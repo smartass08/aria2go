@@ -1,0 +1,6 @@
+https://example.com/file.zip
+ gid=0000000000000001
+ pause=true
+ dir=/home/user/downloads
+ out=file.zip
+ split=5

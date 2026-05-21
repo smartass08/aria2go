@@ -1,0 +1,79 @@
+# Build output directories
+/bin/
+/build/
+/dist/
+/cover/
+
+# Local command binaries
+#
+# Keep these patterns anchored to specific artifact paths. Do not add a bare
+# "aria2go" pattern: it hides real package directories such as cmd/aria2go and
+# pkg/aria2go from git-aware tools.
+/aria2go
+/aria2c
+/genfixtures
+/adr-check
+/claim-sweep
+/dag-validate
+/manifest-lint
+/tracking-render
+/cmd/aria2go/aria2go
+/plans/tools/genfixtures/genfixtures
+/plans/tools/orchestrator/adr-check/adr-check
+/plans/tools/orchestrator/claim-sweep/claim-sweep
+/plans/tools/orchestrator/dag-validate/dag-validate
+/plans/tools/orchestrator/manifest-lint/manifest-lint
+/plans/tools/orchestrator/tracking-render/tracking-render
+
+# Compiled objects and test binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+__debug_bin*
+
+# Coverage
+coverage.out
+coverage.html
+coverage*.txt
+
+# Profiling and traces
+*.prof
+cpu.prof
+mem.prof
+trace.out
+block.prof
+mutex.prof
+goroutine.prof
+
+# Fuzz corpus artifacts produced locally
+**/testdata/fuzz/Fuzz*/seed*
+crashers/
+suppressions/
+
+# Local reference checkout and generated fixture state
+/source-truth/
+/test/benchmark/var/
+
+# Local planning / prompt documents
+/AGENTS.md
+/CHANGELOG
+/CHANGELOG.md
+/ENTRYPOINT.md
+/NOTICE
+/NOTICE.md
+/PROMPT_TEMPLATES.md
+/we-want-to-rewrite-fancy-glade.md
+/plans/local/
+/plans/superpowers/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/settings.json
+*.code-workspace
+*.swp
+*~

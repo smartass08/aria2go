@@ -1,0 +1,20 @@
+https://example.com/file1.iso
+ gid=000000000000000a
+ max-tries=3
+ dir=/downloads
+ out=file1.iso
+ user-agent=aria2go/1.0
+https://example.com/file2.zip	https://mirror.example.com/file2.zip
+ gid=000000000000000b
+ pause=true
+ dir=/downloads
+ out=file2.zip
+ split=8
+ check-integrity=true
+ enable-http-keep-alive=true
+magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ gid=000000000000000c
+ dir=/downloads
+ bt-max-peers=55
+ bt-tracker=http://t1.example.com/announce
+ bt-tracker=http://t2.example.com/announce

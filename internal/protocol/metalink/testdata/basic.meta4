@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="example.iso">
+    <size>1048576</size>
+    <version>1.0</version>
+    <language>en</language>
+    <os>linux</os>
+    <hash type="sha-256">2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824</hash>
+    <url priority="1">https://mirror1.example.com/example.iso</url>
+    <url priority="2">https://mirror2.example.com/example.iso</url>
+  </file>
+</metalink>

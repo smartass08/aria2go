@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smartass08/aria2go/plans/manifest.schema.json",
+  "title": "aria2go manifest",
+  "type": "object",
+  "required": ["schema_version", "project", "policy", "modules", "tickets"],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "project": { "type": "string", "const": "aria2go" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "generator": { "type": "string" },
+    "policy": {
+      "type": "object",
+      "required": ["max_artifact_tokens", "target_artifact_tokens", "complexity_budgets", "library_path"],
+      "properties": {
+        "max_artifact_tokens": { "type": "integer", "minimum": 1000 },
+        "target_artifact_tokens": { "type": "integer", "minimum": 500 },
+        "complexity_budgets": {
+          "type": "object",
+          "properties": {
+            "S":  { "$ref": "#/$defs/budget" },
+            "M":  { "$ref": "#/$defs/budget" },
+            "L":  { "$ref": "#/$defs/budget" },
+            "XL": { "$ref": "#/$defs/budget" }
+          },
+          "required": ["S", "M", "L", "XL"]
+        },
+        "library_path": { "type": "string", "enum": ["a", "b", "pending"] },
+        "reference_aria2_version": { "type": "string" }
+      }
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9]{2}[a-z]?-[a-z0-9-]+$" },
+          "spec": { "type": "string" },
+          "depends_on_modules": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "tickets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ticket" }
+    }
+  },
+  "$defs": {
+    "budget": {
+      "type": "object",
+      "required": ["context", "impl", "test", "total"],
+      "properties": {
+        "context": { "type": "integer", "minimum": 0 },
+        "impl":    { "type": "integer", "minimum": 0 },
+        "test":    { "type": "integer", "minimum": 0 },
+        "total":   { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ticket": {
+      "type": "object",
+      "required": ["id", "module", "title", "path", "status", "depends_on", "blocked_by",
+                   "target_files", "test_files", "context_files", "context_budget_tokens",
+                   "complexity", "priority", "gates", "contract_surface"],
+      "properties": {
+        "id":     { "type": "string", "pattern": "^T\\d{3,}$" },
+        "module": { "type": "string" },
+        "title":  { "type": "string", "maxLength": 100 },
+        "path":   { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "in_progress", "in_review", "done", "blocked"] },
+        "depends_on": { "type": "array", "items": { "type": "string", "pattern": "^T\\d{3,}$" } },
+        "blocked_by": { "type": "array", "items": { "type": "string" } },
+        "target_files": { "type": "array", "items": { "type": "string" } },
+        "test_files":   { "type": "array", "items": { "type": "string" } },
+        "context_files": { "type": "array", "maxItems": 6, "items": { "type": "string" } },
+        "context_budget_tokens": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "complexity": { "type": "string", "enum": ["S", "M", "L", "XL"] },
+        "priority":   { "type": "integer", "minimum": 1, "maximum": 5 },
+        "claimed_by": { "type": ["string", "null"] },
+        "claimed_at": { "type": ["string", "null"], "format": "date-time" },
+        "claim_ttl_seconds": { "type": "integer", "minimum": 60 },
+        "gates": { "type": "array", "items": { "type": "string" } },
+        "contract_surface": {
+          "type": "object",
+          "required": ["cli", "rpc", "session", "config", "fixtures"],
+          "properties": {
+            "cli":      { "type": "array", "items": { "type": "string" } },
+            "rpc":      { "type": "array", "items": { "type": "string" } },
+            "session":  { "type": "array", "items": { "type": "string" } },
+            "config":   { "type": "array", "items": { "type": "string" } },
+            "fixtures": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "notes": { "type": "string", "maxLength": 500 }
+      }
+    }
+  }
+}

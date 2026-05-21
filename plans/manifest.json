@@ -1,0 +1,2883 @@
+{
+  "generated_at": "2026-05-19T00:00:00Z",
+  "generator": "human bootstrap (pre-Phase-0)",
+  "modules": [
+    {
+      "depends_on_modules": [],
+      "id": "00-bootstrap",
+      "spec": "plans/modules/00-bootstrap/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "00-bootstrap",
+        "01-core-engine",
+        "14-rpc-server",
+        "15-config-options",
+        "16-logging-metrics"
+      ],
+      "id": "00-cmd-aria2c",
+      "spec": "plans/modules/00-cmd-aria2c/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "00-bootstrap",
+        "02-uri-parser",
+        "03-protocol-http",
+        "04-protocol-ftp",
+        "05-protocol-sftp",
+        "06-bittorrent-core",
+        "11-metalink",
+        "12-disk-storage",
+        "13-net-shared",
+        "15-config-options",
+        "16-logging-metrics"
+      ],
+      "id": "01-core-engine",
+      "spec": "plans/modules/01-core-engine/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "16-logging-metrics"
+      ],
+      "id": "02-uri-parser",
+      "spec": "plans/modules/02-uri-parser/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "13-net-shared",
+        "15-config-options",
+        "16-logging-metrics"
+      ],
+      "id": "03-protocol-http",
+      "spec": "plans/modules/03-protocol-http/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "13-net-shared",
+        "15-config-options",
+        "16-logging-metrics"
+      ],
+      "id": "04-protocol-ftp",
+      "spec": "plans/modules/04-protocol-ftp/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "13-net-shared",
+        "15-config-options",
+        "16-logging-metrics"
+      ],
+      "id": "05-protocol-sftp",
+      "spec": "plans/modules/05-protocol-sftp/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "12-disk-storage",
+        "13-net-shared",
+        "16-logging-metrics"
+      ],
+      "id": "06-bittorrent-core",
+      "spec": "plans/modules/06-bittorrent-core/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "06-bittorrent-core",
+        "13-net-shared",
+        "16-logging-metrics"
+      ],
+      "id": "07-bittorrent-peer",
+      "spec": "plans/modules/07-bittorrent-peer/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "06-bittorrent-core",
+        "13-net-shared",
+        "16-logging-metrics"
+      ],
+      "id": "08-bittorrent-tracker",
+      "spec": "plans/modules/08-bittorrent-tracker/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "06-bittorrent-core",
+        "13-net-shared",
+        "16-logging-metrics"
+      ],
+      "id": "09-bittorrent-dht",
+      "spec": "plans/modules/09-bittorrent-dht/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "06-bittorrent-core",
+        "07-bittorrent-peer",
+        "08-bittorrent-tracker",
+        "13-net-shared",
+        "16-logging-metrics"
+      ],
+      "id": "10-bittorrent-extensions",
+      "spec": "plans/modules/10-bittorrent-extensions/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "03-protocol-http",
+        "06-bittorrent-core",
+        "16-logging-metrics"
+      ],
+      "id": "11-metalink",
+      "spec": "plans/modules/11-metalink/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "16-logging-metrics"
+      ],
+      "id": "12-disk-storage",
+      "spec": "plans/modules/12-disk-storage/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "16-logging-metrics"
+      ],
+      "id": "13-net-shared",
+      "spec": "plans/modules/13-net-shared/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "01-core-engine",
+        "15-config-options",
+        "16-logging-metrics"
+      ],
+      "id": "14-rpc-server",
+      "spec": "plans/modules/14-rpc-server/SPEC.md"
+    },
+    {
+      "depends_on_modules": [
+        "16-logging-metrics"
+      ],
+      "id": "15-config-options",
+      "spec": "plans/modules/15-config-options/SPEC.md"
+    },
+    {
+      "depends_on_modules": [],
+      "id": "16-logging-metrics",
+      "spec": "plans/modules/16-logging-metrics/SPEC.md"
+    },
+    {
+      "depends_on_modules": [],
+      "id": "17-test-fixtures",
+      "spec": "plans/modules/17-test-fixtures/SPEC.md"
+    }
+  ],
+  "policy": {
+    "complexity_budgets": {
+      "L": {
+        "context": 3500,
+        "impl": 2500,
+        "test": 1000,
+        "total": 7000
+      },
+      "M": {
+        "context": 2500,
+        "impl": 1500,
+        "test": 500,
+        "total": 4500
+      },
+      "S": {
+        "context": 1500,
+        "impl": 700,
+        "test": 300,
+        "total": 2500
+      },
+      "XL": {
+        "context": 5000,
+        "impl": 3500,
+        "test": 1500,
+        "total": 10000
+      }
+    },
+    "library_path": "pending",
+    "max_artifact_tokens": 10000,
+    "reference_aria2_version": "1.37.0",
+    "target_artifact_tokens": 4000
+  },
+  "project": "aria2go",
+  "schema_version": "1.0.0",
+  "tickets": [
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T19:27:02Z",
+      "claimed_by": "deepseek-v4pro-t001-001",
+      "complexity": "S",
+      "context_budget_tokens": 1000,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-build"
+      ],
+      "id": "T001",
+      "module": "00-bootstrap",
+      "notes": "gates passed: go-build; commit=869672e",
+      "path": "plans/modules/00-bootstrap/tickets/T001-go-mod.md",
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "go.mod"
+      ],
+      "test_files": [],
+      "title": "Create go.mod with module path, go directive, toolchain pin"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T19:26:52Z",
+      "claimed_by": "deepseek-v4pro-t002-001",
+      "complexity": "S",
+      "context_budget_tokens": 800,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [],
+      "id": "T002",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; commit=339fc69",
+      "path": "plans/modules/00-bootstrap/tickets/T002-license.md",
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "LICENSE"
+      ],
+      "test_files": [],
+      "title": "Add Apache-2.0 LICENSE file"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t003-001",
+      "complexity": "S",
+      "context_budget_tokens": 1000,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/modules/00-bootstrap/tickets/T011-adr-0001-library-policy.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T011"
+      ],
+      "gates": [],
+      "id": "T003",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; Path (a) strict stdlib — minimal placeholder NOTICE.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "NOTICE"
+      ],
+      "test_files": [],
+      "title": "Add NOTICE placeholder (populated under path b when x/* imports land)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T19:27:26Z",
+      "claimed_by": "deepseek-v4pro-t004-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [],
+      "id": "T004",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; commit=c1bd04caaee60881f550d0b61bf11119752668ef",
+      "path": "plans/modules/00-bootstrap/tickets/T004-readme.md",
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "README.md"
+      ],
+      "test_files": [],
+      "title": "Write project README.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T19:27:30Z",
+      "claimed_by": "deepseek-v4pro-t005-001",
+      "complexity": "S",
+      "context_budget_tokens": 600,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [],
+      "id": "T005",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none",
+      "path": "plans/modules/00-bootstrap/tickets/T005-changelog.md",
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "CHANGELOG.md"
+      ],
+      "test_files": [],
+      "title": "Initial CHANGELOG.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T19:32:48Z",
+      "claimed_by": "deepseek-v4pro-t006-001",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/modules/00-bootstrap/tickets/T001-go-mod.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T001"
+      ],
+      "gates": [],
+      "id": "T006",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; commit=05981d4",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "Makefile"
+      ],
+      "test_files": [],
+      "title": "Write Makefile (build, test, vet, lint, cross-compile, ship-check)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T19:27:59Z",
+      "claimed_by": "deepseek-v4pro-t007-001",
+      "complexity": "S",
+      "context_budget_tokens": 500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [],
+      "id": "T007",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; commit=48f87ff",
+      "path": "plans/modules/00-bootstrap/tickets/T007-gitignore.md",
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        ".gitignore"
+      ],
+      "test_files": [],
+      "title": ".gitignore for Go project + manifest.lock + tmp"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T19:55:23Z",
+      "claimed_by": "deepseek-v4pro-t008-001",
+      "complexity": "M",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T001",
+        "T006"
+      ],
+      "gates": [],
+      "id": "T008",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; commit=c58fb59",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        ".github/workflows/ci.yml"
+      ],
+      "test_files": [],
+      "title": "GitHub Actions CI matrix workflow"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T19:27:58Z",
+      "claimed_by": "deepseek-v4pro-t009-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [],
+      "id": "T009",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; commit=<no-commit>",
+      "path": "plans/modules/00-bootstrap/tickets/T009-plan-md.md",
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/PLAN.md"
+      ],
+      "test_files": [],
+      "title": "Copy master plan to plans/PLAN.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T19:28:07Z",
+      "claimed_by": "deepseek-v4pro-t010-001",
+      "complexity": "S",
+      "context_budget_tokens": 800,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [],
+      "id": "T010",
+      "module": "00-bootstrap",
+      "notes": "Initial TRACKING.md generated reflecting current manifest state.",
+      "path": null,
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "plans/TRACKING.md"
+      ],
+      "test_files": [],
+      "title": "Initial plans/TRACKING.md (regenerated after each submit)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T20:42:11Z",
+      "claimed_by": "deepseek-v4pro-t011-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [],
+      "id": "T011",
+      "module": "00-bootstrap",
+      "notes": "Path (a) strict stdlib per human decision; gates passed: none; commit=42ca94f",
+      "path": "plans/modules/00-bootstrap/tickets/T011-adr-0001-library-policy.md",
+      "priority": 1,
+      "status": "done",
+      "target_files": [
+        "plans/decisions/ADR-0001-library-policy.md"
+      ],
+      "test_files": [],
+      "title": "Write ADR-0001-library-policy.md (resolves path a vs b)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T22:00:00Z",
+      "claimed_by": "deepseek-v4pro-t012-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/decisions/ADR-0001-library-policy.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T011"
+      ],
+      "gates": [],
+      "id": "T012",
+      "module": "00-bootstrap",
+      "notes": "Each ADR's content is verbatim from master plan §2. Single ticket because they all source from one document — keep transcription consistency.; 22 ADR files created in plans/decisions/; gates passed: none (documentation-only)",
+      "path": null,
+      "priority": 1,
+      "status": "done",
+      "target_files": [
+        "plans/decisions/ADR-0002-concurrency-model.md",
+        "plans/decisions/ADR-0003-rpc-framework.md",
+        "plans/decisions/ADR-0004-bt-engine-boundary.md",
+        "plans/decisions/ADR-0005-session-storage.md",
+        "plans/decisions/ADR-0006-scheduler-model.md",
+        "plans/decisions/ADR-0007-test-strategy.md",
+        "plans/decisions/ADR-0008-x-allowlist-policy.md",
+        "plans/decisions/ADR-0009-build-tags-strategy.md",
+        "plans/decisions/ADR-0010-error-policy.md",
+        "plans/decisions/ADR-0011-logging-policy.md",
+        "plans/decisions/ADR-0012-channel-vs-mutex-policy.md",
+        "plans/decisions/ADR-0013-package-layout.md",
+        "plans/decisions/ADR-0014-go-mod-versioning.md",
+        "plans/decisions/ADR-0015-versioning-scheme.md",
+        "plans/decisions/ADR-0016-clean-room-process.md",
+        "plans/decisions/ADR-0017-memory-and-goroutine-ceilings.md",
+        "plans/decisions/ADR-0018-endianness-and-integer-width.md",
+        "plans/decisions/ADR-0019-utp-scope.md",
+        "plans/decisions/ADR-0020-aria2-reference-version.md",
+        "plans/decisions/ADR-0021-ticket-contract-surface.md",
+        "plans/decisions/ADR-0022-ssh-sftp-compat-tests.md",
+        "plans/decisions/ADR-0023-source-truth-boundary.md"
+      ],
+      "test_files": [],
+      "title": "Write ADR-0002 through ADR-0023 (22 ADRs from master plan §2)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T23:00:00Z",
+      "claimed_by": "deepseek-v4pro-t013-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/decisions/ADR-0001-library-policy.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T012"
+      ],
+      "gates": [],
+      "id": "T013",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; 23 ADRs indexed in plans/decisions/INDEX.md. ADR-0022 shown as Deferred per actual file status.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/decisions/INDEX.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/decisions/INDEX.md (ADR table)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T10:30:00Z",
+      "claimed_by": "deepseek-v4pro-t014-spec-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "source-truth/aria2/src/error_code.h"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T014",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none; Spec authored from exact error_code.h enum values (33 codes, 0-32). Full table with symbolic names, descriptions, and example triggers per code. [auto-promoted from in_review]",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/contracts/error-codes.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/contracts/error-codes.md (0..32 mapping)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T15:00:00Z",
+      "claimed_by": "deepseek-v4pro-t015-spec-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [
+          "all"
+        ],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T015",
+      "module": "00-bootstrap",
+      "notes": "All 36 methods (35 aria2 + 1 system.multicall) and 6 notifications documented with params, return structures, error codes, and behavioral notes. Sourced from aria2 manual-src/en/aria2c.rst RPC Interface section (CC-BY).",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/contracts/rpc-methods.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/contracts/rpc-methods.md (35 methods + 6 notifications)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t016-spec-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T016",
+      "module": "00-bootstrap",
+      "notes": "Spec authored from aria2c manual (clean-room). ~197 option entries across 9 categories. Gates: go-vet-adr-check (informational). [human-approved, promoted from in_review]",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/contracts/config-keys.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/contracts/config-keys.md (all ~140 CLI/config options)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T12:00:00Z",
+      "claimed_by": "deepseek-v4pro-t017-spec-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [
+        "source-truth/beps/beps/bep_0003.rst",
+        "source-truth/beps/beps/bep_0009.rst",
+        "source-truth/beps/beps/bep_0010.rst"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T017",
+      "module": "00-bootstrap",
+      "notes": "Spec authored from BEP 3/9/10 (public domain) and session-format.md. Gate go-vet-adr-check: informational (no Go code). Covers bencode, .torrent, magnet, WebSocket, session format. [auto-promoted from in_review]",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/contracts/wire-formats.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/contracts/wire-formats.md (bencode, magnet, .torrent, .metalink, ws, .session)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T21:05:07Z",
+      "claimed_by": "deepseek-v4pro-t018-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/decisions/ADR-0004-bt-engine-boundary.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T012"
+      ],
+      "gates": [],
+      "id": "T018",
+      "module": "00-bootstrap",
+      "notes": "gates passed: none (documentation-only); Four interfaces documented: TorrentStatusProjector, FilePieceMap, TorrentLifecycleControl, TorrentRPCProjection. Supporting types FileSlice, InfoHashV1, InfoHashV2, Verify constants. Concurrency contract and module map included.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/contracts/interfaces.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/contracts/interfaces.md (engine ↔ BT contracts)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t019-spec-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "source-truth/aria2/src/SessionSerializer.cc",
+        "source-truth/aria2/src/SessionSerializer.h"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": [
+          "all"
+        ]
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T019",
+      "module": "00-bootstrap",
+      "notes": "Spec authored from aria2 SessionSerializer; gates passed: none",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/byte-compat/session-format.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/byte-compat/session-format.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T18:00:00Z",
+      "claimed_by": "deepseek-v4pro-t020-spec-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [
+        "plans/contracts/rpc-methods.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [
+          "all"
+        ],
+        "session": []
+      },
+      "depends_on": [
+        "T015"
+      ],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T020",
+      "module": "00-bootstrap",
+      "notes": "gates passed: go-vet-adr-check (informational, no Go code); Spec authored from aria2 1.37.0 manual (CC-BY) RPC Interface section. Documents exact response shapes, field ordering (alphabetical), value formats, null/omitted field rules, error formatting, notification payloads for all 36 methods + 6 notifications. 1127 lines, ~30KB.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/byte-compat/rpc-method-table.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/byte-compat/rpc-method-table.md (per-method response shape goldens)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T20:00:00Z",
+      "claimed_by": "deepseek-v4pro-t021-spec-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/contracts/config-keys.md"
+      ],
+      "contract_surface": {
+        "cli": [
+          "all"
+        ],
+        "config": [
+          "all"
+        ],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T016"
+      ],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T021",
+      "module": "00-bootstrap",
+      "notes": "human approved; promoted from in_review",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/byte-compat/cli-flags-table.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/byte-compat/cli-flags-table.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T20:08:52Z",
+      "claimed_by": "deepseek-v4pro-t022-spec-001",
+      "claims_at": "2026-05-18T20:11:33Z",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "source-truth/aria2/src/DHTRoutingTableSerializer.cc",
+        "source-truth/aria2/src/DHTRoutingTableSerializer.h"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T022",
+      "module": "00-bootstrap",
+      "notes": "Spec authored from aria2 DHTRoutingTableSerializer(Deserializer). Covers header, v2/v3 versioning, node entry format, compact IP:port, atomic write, error handling. Gate go-vet-adr-check: informational pass (no Go code). [auto-promoted from in_review]",
+      "path": null,
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "plans/byte-compat/dht-file-format.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/byte-compat/dht-file-format.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T06:00:00Z",
+      "claimed_by": "deepseek-v4pro-t023-spec-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/contracts/config-keys.md",
+        "source-truth/aria2/src/OptionParser.cc"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [
+          "all"
+        ],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T016"
+      ],
+      "gates": [
+        "go-vet-adr-check"
+      ],
+      "id": "T023",
+      "module": "00-bootstrap",
+      "notes": "human approved; promoted from in_review",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/byte-compat/conf-file-format.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/byte-compat/conf-file-format.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T19:34:36Z",
+      "claimed_by": "deepseek-v4pro-t024-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/manifest.schema.json"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T001"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T024",
+      "module": "00-bootstrap",
+      "notes": "gates passed: go-vet,go-test,race; coverage=91.5%",
+      "path": "plans/modules/00-bootstrap/tickets/T024-manifest-lint.md",
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/tools/orchestrator/manifest-lint/main.go",
+        "plans/tools/orchestrator/internal/manifest/manifest.go",
+        "plans/tools/orchestrator/internal/manifest/lint.go"
+      ],
+      "test_files": [
+        "plans/tools/orchestrator/manifest-lint/main_test.go",
+        "plans/tools/orchestrator/internal/manifest/lint_test.go"
+      ],
+      "title": "Build plans/tools/orchestrator/manifest-lint/main.go"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T14:00:00Z",
+      "claimed_by": "deepseek-v4pro-t025-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/tools/orchestrator/internal/manifest/manifest.go"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T024"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T025",
+      "module": "00-bootstrap",
+      "notes": "gates passed: go-vet,go-test,race; commit=483eb65",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/tools/orchestrator/dag-validate/main.go",
+        "plans/tools/orchestrator/internal/manifest/dag.go"
+      ],
+      "test_files": [
+        "plans/tools/orchestrator/dag-validate/main_test.go"
+      ],
+      "title": "Build plans/tools/orchestrator/dag-validate/main.go"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T23:00:00Z",
+      "claimed_by": "deepseek-v4pro-t026-001",
+      "complexity": "L",
+      "context_budget_tokens": 3500,
+      "context_files": [
+        "plans/decisions/ADR-0016-clean-room-process.md",
+        "plans/decisions/ADR-0023-source-truth-boundary.md",
+        "source-truth/README.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T024"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T026",
+      "module": "00-bootstrap",
+      "notes": "gates passed: go-vet,go-test,race; 22 tests pass. 5 heuristics implemented: GPL header scan, aria2 symbol scan, import-source-truth check, go:embed check, source-truth reference check.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/tools/orchestrator/adr-check/main.go",
+        "plans/tools/orchestrator/internal/adrcheck/scan.go",
+        "plans/tools/orchestrator/adr-check/aria2-symbols.txt"
+      ],
+      "test_files": [
+        "plans/tools/orchestrator/adr-check/main_test.go",
+        "plans/tools/orchestrator/internal/adrcheck/scan_test.go"
+      ],
+      "title": "Build plans/tools/orchestrator/adr-check/main.go (source-truth contamination scanner)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T22:00:00Z",
+      "claimed_by": "deepseek-v4pro-t027-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/tools/orchestrator/internal/manifest/manifest.go"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T024"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T027",
+      "module": "00-bootstrap",
+      "notes": "gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/tools/orchestrator/claim-sweep/main.go"
+      ],
+      "test_files": [
+        "plans/tools/orchestrator/claim-sweep/main_test.go"
+      ],
+      "title": "Build plans/tools/orchestrator/claim-sweep/main.go (TTL recovery cron)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T20:03:33Z",
+      "claimed_by": "deepseek-v4pro-t028-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/tools/orchestrator/internal/manifest/manifest.go"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T024"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test"
+      ],
+      "id": "T028",
+      "module": "00-bootstrap",
+      "notes": "gates passed: go-vet,go-test",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "plans/tools/orchestrator/tracking-render/main.go"
+      ],
+      "test_files": [
+        "plans/tools/orchestrator/tracking-render/main_test.go"
+      ],
+      "title": "Build plans/tools/orchestrator/tracking-render/main.go"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T02:30:00Z",
+      "claimed_by": "deepseek-v4pro-t029-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/decisions/ADR-0011-logging-policy.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T012"
+      ],
+      "gates": [],
+      "id": "T029",
+      "module": "16-logging-metrics",
+      "notes": "SPEC.md and AGENTS.md written for 16-logging-metrics module. 3 tickets outlined (T031-T033) targeting ~400 LOC. Leaf module — unblocks all dependent module SPECs.",
+      "path": null,
+      "priority": 1,
+      "status": "done",
+      "target_files": [
+        "plans/modules/16-logging-metrics/SPEC.md",
+        "plans/modules/16-logging-metrics/AGENTS.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/modules/16-logging-metrics/SPEC.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T21:11:20Z",
+      "claimed_by": "deepseek-v4pro-t030-001",
+      "complexity": "M",
+      "context_budget_tokens": 2500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/decisions/ADR-0009-build-tags-strategy.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T012",
+        "T029"
+      ],
+      "gates": [],
+      "id": "T030",
+      "module": "12-disk-storage",
+      "notes": "SPEC.md and AGENTS.md written for 12-disk-storage module. 11 tickets outlined (T034-T045) targeting ~2200 LOC. Covers SingleFile/MultiFile adaptors, Allocator strategies (none/trunc/falloc/prealloc), per-OS allocation per ADR-0009, Verifier with context cancellation, piece map invariants, write coalescing, sparse files.",
+      "path": null,
+      "priority": 1,
+      "status": "done",
+      "target_files": [
+        "plans/modules/12-disk-storage/SPEC.md",
+        "plans/modules/12-disk-storage/AGENTS.md"
+      ],
+      "test_files": [],
+      "title": "Write plans/modules/12-disk-storage/SPEC.md"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t031-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/decisions/ADR-0011-logging-policy.md",
+        "plans/modules/16-logging-metrics/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T031",
+      "module": "16-logging-metrics",
+      "notes": "gates passed: go-vet,go-test,race; 17 tests pass including FuzzParseLevel. Level type with Notice=2 mapping to slog.LevelInfo via Level() method. ParseLevel case-insensitive with whitespace trim. Global logger via atomic.Pointer. Config uses io.Writer + HandlerType per SPEC (not string-based from ticket brief — SPEC is authoritative design doc). New() uses stdlib placeholder handlers; T032/T033 will wire real classic/json handlers.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/log/log.go"
+      ],
+      "test_files": [
+        "internal/log/log_test.go"
+      ],
+      "title": "internal/log: logger setup, levels, New()"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T00:00:00Z",
+      "claimed_by": "deepseek-v4pro-t032-001",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/log/log.go",
+        "plans/modules/16-logging-metrics/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T031"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T032",
+      "module": "16-logging-metrics",
+      "notes": "gates passed: go-vet,go-test,race; commit=5da536adf63cc434902eae00b83ea24bfa501ed5",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/log/classic.go"
+      ],
+      "test_files": [
+        "internal/log/classic_test.go"
+      ],
+      "title": "internal/log/classic.go: aria2-format slog handler"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t033-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/log/log.go",
+        "plans/modules/16-logging-metrics/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T031"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T033",
+      "module": "16-logging-metrics",
+      "notes": "gates passed: go-vet,go-test,race; Implemented Metrics (per-level atomic counters) and CountingHandler (slog.Handler wrapper). 16 tests pass covering Inc/Count/Total/Snapshot/Reset, concurrent safety, and CountingHandler delegation/level-filtering/WithAttrs.",
+      "path": null,
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "internal/log/metrics.go"
+      ],
+      "test_files": [
+        "internal/log/metrics_test.go"
+      ],
+      "title": "internal/log/metrics.go: log counters, level stats"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T12:00:00Z",
+      "claimed_by": "deepseek-v4pro-t034-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/contracts/error-codes.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T034",
+      "module": "01-core-engine",
+      "notes": "gates passed: go-vet,go-test,race [auto-promoted]",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/core/types.go"
+      ],
+      "test_files": [
+        "internal/core/types_test.go"
+      ],
+      "title": "internal/core/types.go: GID, Status, ErrorCode, Event"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": null,
+      "claimed_by": "deepseek-v4pro-t035-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/core/types.go",
+        "plans/contracts/error-codes.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T034"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T035",
+      "module": "01-core-engine",
+      "notes": "All gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/core/errors.go"
+      ],
+      "test_files": [
+        "internal/core/errors_test.go"
+      ],
+      "title": "internal/core/errors.go: sentinel errors, ErrorCode mapping"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T21:24:47Z",
+      "claimed_by": "deepseek-v4pro-t036-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T036",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/ioutilx/pool.go"
+      ],
+      "test_files": [
+        "internal/ioutilx/pool_test.go"
+      ],
+      "title": "internal/ioutilx/pool.go: Pool4K, Pool16K, Pool64K"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T21:34:26Z",
+      "claimed_by": "deepseek-v4pro-t037-001",
+      "complexity": "S",
+      "context_budget_tokens": 1200,
+      "context_files": [
+        "internal/ioutilx/pool.go",
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T036"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T037",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/ioutilx/atomic.go"
+      ],
+      "test_files": [
+        "internal/ioutilx/atomic_test.go"
+      ],
+      "title": "internal/ioutilx/atomic.go: atomic file write (temp+rename)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T22:00:00Z",
+      "claimed_by": "deepseek-v4pro-t038-001",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md",
+        "plans/decisions/ADR-0009-build-tags-strategy.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T038",
+      "module": "13-net-shared",
+      "notes": "gates passed: go-vet,go-test,race; Single-file implementation using runtime.GOOS checks in init(). Caps() returns compile-time-constant result for process lifetime. Covers linux, darwin, freebsd, openbsd, windows.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/platform/caps.go"
+      ],
+      "test_files": [
+        "internal/platform/caps_test.go"
+      ],
+      "title": "internal/platform/caps.go: Cap type, runtime detection"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T23:30:00Z",
+      "claimed_by": "deepseek-v4pro-t039-001",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/platform/caps.go"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T038"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T039",
+      "module": "13-net-shared",
+      "notes": "Per-OS Caps() impls via //go:build tags. Linux: full. macOS: no InterfaceBind. Windows: no UnixSocket. gates passed: go-vet,go-test,race.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/platform/caps_linux.go",
+        "internal/platform/caps_darwin.go",
+        "internal/platform/caps_windows.go"
+      ],
+      "test_files": [],
+      "title": "internal/platform: per-OS caps_*.go stubs"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T18:00:00Z",
+      "claimed_by": "deepseek-v4pro-t040-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T040",
+      "module": "06-bittorrent-core",
+      "notes": "gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/hash/hash.go"
+      ],
+      "test_files": [
+        "internal/hash/hash_test.go"
+      ],
+      "title": "internal/hash/hash.go: Kind, New(), Parse()"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T18:00:00Z",
+      "claimed_by": "deepseek-v4pro-t041-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T041",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race; Allocator interface + None/Trunc/Prealloc implementations. 5 tests covering no-op, truncate, zero-fill prealloc, default BufSize, and zero-size allocation.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/disk/allocator.go"
+      ],
+      "test_files": [
+        "internal/disk/allocator_test.go"
+      ],
+      "title": "internal/disk/allocator.go: Allocator interface + None + Trunc"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T18:00:00Z",
+      "claimed_by": "deepseek-v4pro-t042-001",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/disk/allocator.go",
+        "internal/platform/caps.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T041"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T042",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race; Created falloc.go (!linux) and falloc_linux.go (linux) using build tags because syscall.Fallocate is not available on Darwin. falloc_test.go with 5 tests: name, set size, zero size, read-only file, fallback correctness.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/disk/falloc.go"
+      ],
+      "test_files": [
+        "internal/disk/falloc_test.go"
+      ],
+      "title": "internal/disk/falloc.go: falloc allocator (per-OS fallocate)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T12:00:00Z",
+      "claimed_by": "deepseek-v4pro-t043-001",
+      "complexity": "S",
+      "context_budget_tokens": 1200,
+      "context_files": [
+        "internal/core/errors.go",
+        "plans/contracts/error-codes.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T043",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race; 10/10 tests pass. Uses private wrappedDiskError with Is/As methods to support errors.Is(sentinel) matching, since core.Error does not implement Is. Wrap maps ENOSPC→ErrDiskFull, EIO→ErrWriteError/ErrReadError, EINVAL→ErrInvalidOffset, EBADF→ErrFileClosed. IsDiskFull uses errors.Is against syscall.ENOSPC.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/disk/errors.go"
+      ],
+      "test_files": [
+        "internal/disk/errors_test.go"
+      ],
+      "title": "internal/disk/errors.go: disk-specific errors"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": null,
+      "claimed_by": "deepseek-v4pro-t044-001",
+      "completed_at": 1779141296,
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/disk/allocator.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T041",
+        "T043"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T044",
+      "module": "12-disk-storage",
+      "notes": "Adaptor{OpenForWrite,WriteAt,ReadAt,Size,Sync,Close}. BT piece methods: SetPieceCount,MarkPiece,Have,Bitfield,Missing. FileEntry{Name,Length,Offset}.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/disk/adaptor.go"
+      ],
+      "test_files": [
+        "internal/disk/adaptor_test.go"
+      ],
+      "title": "internal/disk/adaptor.go: Adaptor interface + FileEntry type"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T22:01:21Z",
+      "claimed_by": "deepseek-v4pro-t045-001",
+      "completed_at": 1779141976,
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/disk/adaptor.go",
+        "internal/ioutilx/pool.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T044"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T045",
+      "module": "12-disk-storage",
+      "notes": "SingleFile wraps one os.File. Implements Adaptor. Piece tracking via internal []bool bitfield.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/disk/single_file.go"
+      ],
+      "test_files": [
+        "internal/disk/single_file_test.go"
+      ],
+      "title": "internal/disk/single_file.go: SingleFile adaptor"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T22:03:29Z",
+      "claimed_by": "deepseek-v4pro-t046-001",
+      "complexity": "L",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/disk/adaptor.go",
+        "internal/disk/single_file.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T044"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T046",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race; 23 tests covering: NewMultiFile validation, OpenForWrite (dir creation, subdirs, idempotency, after-close), WriteAt (single-file, cross-boundary, invalid offset, empty buffer), ReadAt (single-file, across-boundary, EOF, beyond-size, gap-zero-fill, partial file, empty buffer), Close (idempotent, operations-after-close), Sync, piece tracking (SetPieceCount, MarkPiece, Have, Bitfield MSB-first, Missing, reinit), zero-length files, double-write+read [auto-promoted]",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/disk/multi_file.go"
+      ],
+      "test_files": [
+        "internal/disk/multi_file_test.go"
+      ],
+      "title": "internal/disk/multi_file.go: MultiFile adaptor with piece boundaries"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T16:00:00Z",
+      "claimed_by": "deepseek-v4pro-t047-001",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/disk/adaptor.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T044"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T047",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race; 15 tests pass. Implemented pieceMap with RWMutex-protected setCount/mark/have/count/bitfield/missing. MSB-first bitfield encoding. Bounds-safe: out-of-range indices are no-ops. mark(i,false) is idempotent. Zero-count safe.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/disk/piece_map.go"
+      ],
+      "test_files": [
+        "internal/disk/piece_map_test.go"
+      ],
+      "title": "internal/disk/piece_map.go: piece state, bitfield, missing pieces"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": null,
+      "claimed_by": "deepseek-v4pro-t048-001",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/disk/adaptor.go",
+        "internal/hash/hash.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T044",
+        "T040"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T048",
+      "module": "12-disk-storage",
+      "notes": "Spec resolved; verifier with Verify(ctx) implemented; gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "internal/disk/verifier.go"
+      ],
+      "test_files": [
+        "internal/disk/verifier_test.go"
+      ],
+      "title": "internal/disk/verifier.go: piece hash verification"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T22:02:23Z",
+      "claimed_by": "deepseek-v4pro-t049-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/ioutilx/pool.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T044",
+        "T036"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T049",
+      "module": "12-disk-storage",
+      "notes": "256KB staging buffer. Flush contiguous writes. Uses ioutilx.Pool64K for block buffers. Reduces syscalls for small writes.",
+      "path": null,
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "internal/disk/write_buffer.go"
+      ],
+      "test_files": [
+        "internal/disk/write_buffer_test.go"
+      ],
+      "title": "internal/disk/write_buffer.go: write coalescing"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T14:00:00Z",
+      "claimed_by": "deepseek-v4pro-t050-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/platform/caps.go",
+        "plans/modules/12-disk-storage/SPEC.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T041"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T050",
+      "module": "12-disk-storage",
+      "notes": "gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 4,
+      "status": "done",
+      "target_files": [
+        "internal/disk/sparse.go"
+      ],
+      "test_files": [
+        "internal/disk/sparse_test.go"
+      ],
+      "title": "internal/disk/sparse.go: sparse file allocation support"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T22:55:44Z",
+      "claimed_by": "deepseek-v4pro-t051",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T051",
+      "module": "15-config-options",
+      "notes": "gates passed: go-vet, go-test, race; 12 tests",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/netrc/netrc.go"
+      ],
+      "test_files": [
+        "internal/netrc/netrc_test.go"
+      ],
+      "title": "internal/netrc/netrc.go: Parse(), Entry, LoadDefault()"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t052",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/contracts/wire-formats.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T052",
+      "module": "06-bittorrent-core",
+      "notes": "gates passed: go-vet,go-test,race; 14 tests pass",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/bencode/types.go"
+      ],
+      "test_files": [
+        "internal/bencode/types_test.go"
+      ],
+      "title": "internal/bencode/types.go: Value type, Kind(), helpers"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T12:00:00Z",
+      "claimed_by": "deepseek-v4pro-t053",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/bencode/types.go",
+        "plans/contracts/wire-formats.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T052"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T053",
+      "module": "06-bittorrent-core",
+      "notes": "gates passed: go-vet,go-test,race; 44 tests pass. Streaming decoder with small buffered reader. Supports strings, ints, lists, dicts. Validates int format (no leading zeros, no negative zero), dict key ordering, truncated input. Unmarshal supports *Value, *int64, *string, *[]Value, *map[string]Value.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/bencode/decode.go"
+      ],
+      "test_files": [
+        "internal/bencode/decode_test.go"
+      ],
+      "title": "internal/bencode/decode.go: streaming decoder from io.Reader",
+      "completed_at": 1779147538
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T18:00:00Z",
+      "claimed_by": "deepseek-v4pro-t054",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/bencode/decode.go",
+        "internal/bencode/types.go",
+        "plans/contracts/wire-formats.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T053"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T054",
+      "module": "06-bittorrent-core",
+      "notes": "Bencode encoder done",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/bencode/encode.go"
+      ],
+      "test_files": [
+        "internal/bencode/encode_test.go"
+      ],
+      "title": "internal/bencode/encode.go: encoder + ExtractRaw for infohash"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T22:53:31Z",
+      "claimed_by": "deepseek-v4pro-t055",
+      "completed_at": 1779145095,
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/core/types.go",
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T055",
+      "module": "13-net-shared",
+      "notes": "gates passed: go-vet,go-test,race; 15 tests pass covering minimal config, CA certs, client cert, ALPN, SkipVerify, pinned cert verification (match/mismatch), invalid certs, custom MinVersion, ServerConfig with ClientAuth, missing files, invalid certs.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/tlsx/tlsx.go"
+      ],
+      "test_files": [
+        "internal/tlsx/tlsx_test.go"
+      ],
+      "title": "internal/tlsx/tlsx.go: ClientConfig, ServerConfig TLS wrappers"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T22:53:01Z",
+      "claimed_by": "deepseek-v4pro-t056-001",
+      "completed_at": 1779145063,
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T056",
+      "module": "15-config-options",
+      "notes": "gates passed: go-vet,go-test,race; 17 tests pass covering LoadNetscape round-trip, domain/path matching, secure-only, expired cookies, SetCookies MaxAge/expiry/host-only, comment/empty lines, invalid field count, invalid expires, deterministic SaveNetscape ordering.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/cookies/cookies.go"
+      ],
+      "test_files": [
+        "internal/cookies/cookies_test.go"
+      ],
+      "title": "internal/cookies/cookies.go: Netscape cookie jar"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T22:53:43Z",
+      "claimed_by": "deepseek-v4pro-t057-001",
+      "complexity": "S",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/core/types.go",
+        "internal/hash/hash.go",
+        "plans/contracts/wire-formats.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T057",
+      "module": "06-bittorrent-core",
+      "notes": "gates passed: go-vet,go-test,race",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/magnet/magnet.go"
+      ],
+      "test_files": [
+        "internal/magnet/magnet_test.go"
+      ],
+      "title": "internal/magnet/magnet.go: magnet URI parser",
+      "completed_at": 1779145180
+    },
+    {
+      "id": "T058",
+      "module": "15-config-options",
+      "title": "internal/config/options.go: Options struct with all ~140 fields",
+      "path": null,
+      "status": "done",
+      "depends_on": [],
+      "blocked_by": [],
+      "target_files": [
+        "internal/config/options.go"
+      ],
+      "test_files": [
+        "internal/config/options_test.go"
+      ],
+      "context_files": [
+        "plans/contracts/config-keys.md"
+      ],
+      "context_budget_tokens": 2000,
+      "complexity": "L",
+      "priority": 2,
+      "claimed_by": "deepseek-v4pro-t058",
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claim_ttl_seconds": 7200,
+      "gates": [
+        "go-vet",
+        "go-test"
+      ],
+      "contract_surface": {
+        "cli": [
+          "all"
+        ],
+        "config": [
+          "all"
+        ],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "notes": "All gates passed: go-vet,go-test. 195 fields covering Basic/HTTP/FTP/Shared/Checksum/BT/Metalink/RPC/Advanced. Fields() method returns all option names."
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t059",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/config/options.go",
+        "plans/contracts/config-keys.md"
+      ],
+      "contract_surface": {
+        "cli": [
+          "all"
+        ],
+        "config": [
+          "all"
+        ],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T058"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test"
+      ],
+      "id": "T059",
+      "module": "15-config-options",
+      "notes": "gates passed: go-vet, go-test. Default() sets all ~190 options per config-keys.md. Validate() checks Split/MaxConn/Port/LogLevel/FileAllocation/MinSplitSize + integer non-negativity. Error type with ErrInvalidOption(28) code.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/config/defaults.go"
+      ],
+      "test_files": [
+        "internal/config/defaults_test.go"
+      ],
+      "title": "internal/config/defaults.go: Default() + Validate()",
+      "completed_at": 1779147226
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T10:00:00Z",
+      "claimed_by": "deepseek-v4pro-t060",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/config/options.go",
+        "plans/contracts/config-keys.md"
+      ],
+      "contract_surface": {
+        "cli": [
+          "all"
+        ],
+        "config": [
+          "all"
+        ],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T058"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T060",
+      "module": "15-config-options",
+      "notes": "gates passed: go-vet,go-test,race; Merge() with reflect-based field merging. Accumulative fields: header, index-out, bt-tracker, bt-exclude-tracker, dht-entry-point, dht-entry-point6 concatenate; all others replace. 20 tests pass.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/config/merge.go"
+      ],
+      "test_files": [
+        "internal/config/merge_test.go"
+      ],
+      "title": "internal/config/merge.go: Merge() with precedence"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T23:36:03Z",
+      "claimed_by": "deepseek-v4pro-t061",
+      "complexity": "L",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "internal/config/options.go",
+        "plans/byte-compat/cli-flags-table.md",
+        "plans/contracts/config-keys.md"
+      ],
+      "contract_surface": {
+        "cli": [
+          "all"
+        ],
+        "config": [
+          "all"
+        ],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T058",
+        "T059"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T061",
+      "module": "15-config-options",
+      "notes": "gates passed: go-vet,go-test,race; ParseArgs with long/short forms, booleans, accumulative, error cases. 33 tests pass.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/config/parse_args.go"
+      ],
+      "test_files": [
+        "internal/config/parse_args_test.go"
+      ],
+      "title": "internal/config/parse_args.go: ParseArgs from CLI flags",
+      "completed_at": 1779147383
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T23:26:05Z",
+      "claimed_by": "deepseek-v4pro-t062-001",
+      "complexity": "L",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "internal/config/options.go",
+        "plans/byte-compat/conf-file-format.md",
+        "plans/contracts/config-keys.md"
+      ],
+      "contract_surface": {
+        "cli": [
+          "all"
+        ],
+        "config": [
+          "all"
+        ],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T058",
+        "T051"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T062",
+      "module": "15-config-options",
+      "notes": "gates passed: go-vet,go-test,race; 34 tests pass. Implements line-by-line parsing of aria2.conf with reflection-based field mapping. Handles: key=value, # comments, blank/whitespace lines, bool true/false only, int parsing, string storage, accumulative []string fields (header, index-out, bt-tracker, bt-exclude-tracker, dht-entry-point, dht-entry-point6), unknown key silent ignore, CRLF support, last-wins for non-accumulative duplicates.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/config/parse_conf.go"
+      ],
+      "test_files": [
+        "internal/config/parse_conf_test.go"
+      ],
+      "title": "internal/config/parse_conf.go: ParseConf from aria2.conf"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T00:01:50Z",
+      "claimed_by": "deepseek-v4pro-t063",
+      "complexity": "M",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "internal/bencode/decode.go",
+        "internal/bencode/types.go",
+        "internal/hash/hash.go",
+        "plans/contracts/wire-formats.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": [
+          "torrent"
+        ]
+      },
+      "depends_on": [
+        "T053"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T063",
+      "module": "06-bittorrent-core",
+      "notes": "Torrent loader done",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/torrent/torrent.go"
+      ],
+      "test_files": [
+        "internal/torrent/torrent_test.go"
+      ],
+      "title": "internal/torrent/torrent.go: MetaInfo, Load(), InfoHashV1/V2"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": null,
+      "claimed_by": "deepseek-v4pro-t064-001",
+      "complexity": "L",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "internal/hash/hash.go",
+        "plans/contracts/wire-formats.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T064",
+      "module": "06-bittorrent-core",
+      "notes": "MSE done",
+      "path": null,
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "internal/mse/mse.go"
+      ],
+      "test_files": [
+        "internal/mse/mse_test.go"
+      ],
+      "title": "internal/mse/mse.go: Message Stream Encryption (BEP 8/PE)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-19T16:00:00Z",
+      "claimed_by": "deepseek-v4pro-t065",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/bencode/types.go",
+        "plans/contracts/wire-formats.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T052"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T065",
+      "module": "09-bittorrent-dht",
+      "notes": "gates passed: go-vet,go-test,race; coverage=90.0%. 27 tests pass. KRPC Message types (query/response/error) with bencode marshal/unmarshal. NodeID, NodeInfo compact encoding, CompactNodes. Query constants (ping/find_node/get_peers/announce_peer). Minimal bencode scanner for Unmarshal (T053 decoder was in_progress).",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/dht/krpc.go"
+      ],
+      "test_files": [
+        "internal/dht/krpc_test.go"
+      ],
+      "title": "internal/dht/krpc.go: DHT KRPC message types (BEP 5)"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T22:00:00Z",
+      "claimed_by": "deepseek-v4pro-t066",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/platform/caps.go",
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T066",
+      "module": "13-net-shared",
+      "notes": "gates passed: go-vet,go-test,race. Created dialer_bind_unix.go and dialer_bind_windows.go (build-tagged) for per-OS interface binding syscalls; same pattern as T039 caps_*.go.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/netx/dialer.go"
+      ],
+      "test_files": [
+        "internal/netx/dialer_test.go"
+      ],
+      "title": "internal/netx/dialer.go: Dialer with timeout, proxy, interface bind"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 3600,
+      "claimed_at": "2026-05-18T23:27:38Z",
+      "claimed_by": "deepseek-v4pro-t067",
+      "complexity": "M",
+      "context_budget_tokens": 1500,
+      "context_files": [
+        "internal/netx/dialer.go"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T066"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T067",
+      "module": "13-net-shared",
+      "notes": "gates passed: go-vet,go-test,race. Resolver with net.Resolver + inline singleflight + 60s TTL cache. LookupHost returns defensive copies. Flush clears cache. 12 tests pass.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/netx/resolver.go"
+      ],
+      "test_files": [
+        "internal/netx/resolver_test.go"
+      ],
+      "title": "internal/netx/resolver.go: async DNS with singleflight + TTL cache",
+      "completed_at": 1779147535
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-18T23:27:36Z",
+      "claimed_by": "deepseek-v4pro-t068-001",
+      "complexity": "L",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T066"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test"
+      ],
+      "id": "T068",
+      "module": "13-net-shared",
+      "notes": "gates passed: go-vet,go-test; Simplified UPnP IGD port mapping with SSDP discovery, SOAP AddPortMapping/DeletePortMapping/GetExternalIPAddress, config validation, graceful shutdown. 8 tests pass.",
+      "path": null,
+      "priority": 3,
+      "status": "done",
+      "target_files": [
+        "internal/portmap/portmap.go"
+      ],
+      "test_files": [
+        "internal/portmap/portmap_test.go"
+      ],
+      "title": "internal/portmap/portmap.go: UPnP port mapping",
+      "completed_at": 1779147142
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": "2026-05-19T12:00:00Z",
+      "claimed_by": "deepseek-v4pro-t069",
+      "complexity": "L",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "internal/netx/dialer.go",
+        "internal/tlsx/tlsx.go",
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T066",
+        "T055"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T069",
+      "module": "04-protocol-ftp",
+      "notes": "FTP control connection done; audit fixes applied",
+      "path": null,
+      "priority": 2,
+      "completed_at": 1779159680,
+      "status": "done",
+      "target_files": [
+        "internal/protocol/ftp/conn.go"
+      ],
+      "test_files": [
+        "internal/protocol/ftp/conn_test.go"
+      ],
+      "title": "internal/ftp/conn.go: FTP control connection + login"
+    },
+    {
+      "blocked_by": [],
+      "claim_ttl_seconds": 7200,
+      "claimed_at": null,
+      "claimed_by": "deepseek-v4pro-t070-001",
+      "complexity": "L",
+      "context_budget_tokens": 2000,
+      "context_files": [
+        "internal/netx/dialer.go",
+        "internal/tlsx/tlsx.go",
+        "plans/PLAN.md"
+      ],
+      "contract_surface": {
+        "cli": [],
+        "config": [],
+        "fixtures": [],
+        "rpc": [],
+        "session": []
+      },
+      "depends_on": [
+        "T066",
+        "T055",
+        "T056"
+      ],
+      "gates": [
+        "go-vet",
+        "go-test",
+        "race"
+      ],
+      "id": "T070",
+      "module": "03-protocol-http",
+      "notes": "HTTP/1.1 download driver. Single http.Client per driver. Range requests, redirects, auth, cookies. Accept-Encoding:identity for Range+gzip safety.",
+      "path": null,
+      "priority": 2,
+      "status": "done",
+      "target_files": [
+        "internal/protocol/http/downloader.go"
+      ],
+      "test_files": [
+        "internal/protocol/http/downloader_test.go"
+      ],
+      "title": "internal/http/downloader.go: HTTP download driver"
+    }
+  ]
+}

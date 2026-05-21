@@ -1,0 +1,34 @@
+{
+  "schema_version": "bad-version",
+  "project": "wrong-project",
+  "policy": {
+    "max_artifact_tokens": 10,
+    "target_artifact_tokens": 5,
+    "complexity_budgets": {},
+    "library_path": "invalid"
+  },
+  "modules": [],
+  "tickets": [
+    {
+      "id": "X01",
+      "module": "nonexistent",
+      "title": "bad",
+      "path": "/nonexistent/file.md",
+      "status": "unknown",
+      "depends_on": [],
+      "blocked_by": [],
+      "target_files": [],
+      "test_files": [],
+      "context_files": [],
+      "context_budget_tokens": 99999,
+      "complexity": "XXL",
+      "priority": 99,
+      "claimed_by": null,
+      "claimed_at": null,
+      "claim_ttl_seconds": 1,
+      "gates": ["invalid-gate"],
+      "contract_surface": {"cli": [], "rpc": [], "session": [], "config": [], "fixtures": []},
+      "notes": ""
+    }
+  ]
+}

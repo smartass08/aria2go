@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0.0",
+  "project": "aria2go",
+  "generated_at": "2026-05-19T00:00:00Z",
+  "generator": "test",
+  "policy": {
+    "max_artifact_tokens": 10000,
+    "target_artifact_tokens": 4000,
+    "complexity_budgets": {
+      "S": {"context": 1500, "impl": 700, "test": 300, "total": 2500},
+      "M": {"context": 2500, "impl": 1500, "test": 500, "total": 4500},
+      "L": {"context": 3500, "impl": 2500, "test": 1000, "total": 7000},
+      "XL": {"context": 5000, "impl": 3500, "test": 1500, "total": 10000}
+    },
+    "library_path": "pending",
+    "reference_aria2_version": "1.37.0"
+  },
+  "modules": [
+    {"id": "00-bootstrap", "spec": "plans/modules/00-bootstrap/SPEC.md", "depends_on_modules": []},
+    {"id": "16-logging-metrics", "spec": "plans/modules/16-logging-metrics/SPEC.md", "depends_on_modules": []}
+  ],
+  "tickets": [
+    {
+      "id": "T001",
+      "module": "00-bootstrap",
+      "title": "Create go.mod",
+      "path": "plans/tools/orchestrator/manifest-lint/testdata/valid.json",
+      "status": "done",
+      "depends_on": [],
+      "blocked_by": [],
+      "target_files": ["go.mod"],
+      "test_files": [],
+      "context_files": ["ENTRYPOINT.md"],
+      "context_budget_tokens": 1000,
+      "complexity": "S",
+      "priority": 1,
+      "claimed_by": "agent-001",
+      "claimed_at": "2026-05-18T00:00:00Z",
+      "claim_ttl_seconds": 7200,
+      "gates": ["go-build"],
+      "contract_surface": {"cli": [], "rpc": [], "session": [], "config": [], "fixtures": []},
+      "notes": "done"
+    },
+    {
+      "id": "T002",
+      "module": "00-bootstrap",
+      "title": "Write LICENSE",
+      "path": "plans/tools/orchestrator/manifest-lint/testdata/valid.json",
+      "status": "pending",
+      "depends_on": ["T001"],
+      "blocked_by": [],
+      "target_files": ["LICENSE"],
+      "test_files": [],
+      "context_files": ["ENTRYPOINT.md"],
+      "context_budget_tokens": 800,
+      "complexity": "S",
+      "priority": 2,
+      "claimed_by": null,
+      "claimed_at": null,
+      "claim_ttl_seconds": 3600,
+      "gates": [],
+      "contract_surface": {"cli": [], "rpc": [], "session": [], "config": [], "fixtures": []},
+      "notes": ""
+    }
+  ]
+}

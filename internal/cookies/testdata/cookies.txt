@@ -1,0 +1,9 @@
+# Netscape HTTP Cookie File
+# This is a generated file!  Do not edit.
+
+.example.com	TRUE	/	FALSE	2147483647	session_id	abc123def456
+.example.com	TRUE	/login	TRUE	2147483647	auth_token	secret789
+.sub.example.com	FALSE	/	FALSE	0	theme	dark
+other.net	TRUE	/app	FALSE	1893456000	lang	en-US
+192.168.1.1	FALSE	/	FALSE	2147483647	local_setting	on
+.example.com	TRUE	/api	TRUE	0	csrf	deadbeef

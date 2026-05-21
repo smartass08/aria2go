@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }}, Go ${{ matrix.go-version }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            go-version: '1.25'
+            experimental: false
+          - os: macos-latest
+            go-version: '1.25'
+            experimental: false
+          - os: windows-latest
+            go-version: '1.25'
+            experimental: false
+          - os: ubuntu-latest
+            go-version: stable
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: ${{ matrix.experimental }}
+      - run: go vet ./cmd/... ./internal/... ./pkg/... ./test/...
+      - run: go test -race ./cmd/... ./internal/... ./pkg/... ./test/...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: test -z "$(gofmt -l cmd internal pkg test 2>/dev/null)" || (echo "Files not gofmt'd:" && gofmt -l cmd internal pkg test && exit 1)
+
+  fuzz-short:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Run short fuzz tests (30s each)
+        run: |
+          for dir in $(go list -f '{{.Dir}}' ./internal/... 2>/dev/null); do
+            if ls $dir/fuzz_test.go >/dev/null 2>&1; then
+              pkg=$(go list -f '{{.ImportPath}}' $(echo $dir | sed 's|.*/aria2go/||' | xargs -I{} echo ./{}))
+              grep -oP 'func Fuzz\w+' $dir/fuzz_test.go | sed 's/func //' | while read fuzz; do
+                go test -run='^$' -fuzz="^${fuzz}$" -fuzztime=30s $pkg || true
+              done
+            fi
+          done
