@@ -22,11 +22,6 @@ case behavior against `aria2c`.
 For the longer write-up on how the AI rewrite was done, see
 [docs/ai-rewrite.md](docs/ai-rewrite.md).
 
-## Repository
-
-- Repository: `github.com/smartass08/aria2go`
-- Go module: `github.com/smartass08/aria2go`
-
 ## Build
 
 ```bash
