@@ -1009,6 +1009,17 @@ func TestRunStopWithProcessRequestsShutdown(t *testing.T) {
 }
 
 func TestRunExitsWhenQueuesDrainWithoutRPC(t *testing.T) {
+	// aria2 dry-run still probes the server (HTTP HEAD), so point at a local
+	// fixture to keep this test offline while exercising the real probe path.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(make([]byte, 1024))
+		}
+	}))
+	defer server.Close()
+
 	opts := testOpts()
 	opts.DryRun = true
 	opts.EnableRPC = false
@@ -1018,7 +1029,7 @@ func TestRunExitsWhenQueuesDrainWithoutRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if _, err := e.Add(AddSpec{URIs: []string{"http://example.com/file.iso"}}); err != nil {
+	if _, err := e.Add(AddSpec{URIs: []string{server.URL + "/file.iso"}}); err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
 

@@ -66,6 +66,9 @@ suppressions/
 /active-ref
 /active-ref.aria2
 
+# Agent worktrees (harness-managed full-repo checkouts; never commit)
+/.claude/worktrees/
+
 # Local planning / prompt documents
 /AGENTS.md
 /CHANGELOG

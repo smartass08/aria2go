@@ -489,7 +489,7 @@
       "id": "bt.magnet-runtime",
       "area": "BitTorrent",
       "feature": "Magnet URI download",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/usage_text.h",
         "source-truth/aria2/src/DefaultExtensionMessageFactory.cc",
@@ -502,14 +502,15 @@
       ],
       "conformance_coverage": [
         "test/conformance/bittorrent_magnet_test.go:343",
-        "test/conformance/bittorrent_magnet_test.go:368"
+        "test/conformance/bittorrent_magnet_test.go:368",
+        "test/conformance/bt_parity_test.go:360"
       ],
       "unit_coverage": [
         "internal/magnet/magnet_test.go:33",
         "internal/engine/bt_magnet_test.go:338",
         "internal/engine/bt_magnet_test.go:396"
       ],
-      "notes": "Tracker-backed ut_metadata download and metadata-only/save flows are conformance-covered. Saved-metadata reload has engine runtime tests, so this row stays partial until that path is exercised against aria2c."
+      "notes": "Conformance covers tracker-backed ut_metadata download, metadata-only/save, pause-metadata, and the bt-save-metadata then bt-load-saved-metadata round trip against aria2c (saved torrent reused without re-fetching metadata). UDP-tracker magnet peer collection is not exercised offline."
     },
     {
       "id": "bt.pause-metadata-runtime",
@@ -588,7 +589,7 @@
       "id": "config.dht-entry-point-split-host-port",
       "area": "Config",
       "feature": "Internal split dht-entry-point host/port prefs",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/prefs.cc",
         "source-truth/aria2/src/OptionHandlerFactory.cc"
@@ -598,9 +599,11 @@
         "internal/config/parse_args.go:59",
         "internal/config/parse_conf.go:32"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/bt_parity_test.go:307"
+      ],
       "unit_coverage": [],
-      "notes": "Go keeps hidden split host/port prefs in its config inventory for lifecycle plumbing. This entry only classifies those internal knobs; runtime DHT entry-point parity still belongs to the combined dht-entry-point and dht-entry-point6 options under bt.dht-peer-discovery."
+      "notes": "Conformance verifies both binaries accept --dht-entry-point=host:port (including ip:port and [ipv6]:port) and split it into the hidden host/port prefs without error. Runtime DHT entry-point dialing parity still belongs to the combined dht-entry-point options under bt.dht-peer-discovery."
     },
     {
       "id": "bt.peer-exchange",
@@ -623,7 +626,7 @@
         "internal/protocol/bittorrent/peer/extensions_test.go:103",
         "internal/protocol/bittorrent/peer/peer_session_test.go:198"
       ],
-      "notes": "ut_pex reserved-bit advertising plus send/receive handling are wired for active swarms. This stays partial because there is no cross-binary conformance fixture and no broader aria2 parity claim for PEX-driven peer acquisition yet."
+      "notes": "ut_pex reserved-bit advertising plus send/receive handling are wired for active swarms, and both fresh (added) and dropped peers are now fed to discovery, matching aria2's UTPexExtensionMessage::doReceivedAction. Stays partial because there is no cross-binary PEX-acquisition conformance fixture (would need a 3-node swarm)."
     },
     {
       "id": "bt.tracker-http",
@@ -666,9 +669,11 @@
       ],
       "conformance_coverage": [],
       "unit_coverage": [
-        "internal/tracker/tracker_test.go:159"
+        "internal/tracker/tracker_test.go:159",
+        "internal/engine/bt_discovery_test.go:110",
+        "internal/engine/bt_discovery_test.go:129"
       ],
-      "notes": "The tracker dispatcher now routes udp:// announces through the BitTorrent runtime. This stays partial because there is still no dedicated reference-vs-Go conformance fixture for UDP tracker behavior."
+      "notes": "The tracker dispatcher routes udp:// announces through the BitTorrent runtime, and bt-tracker-connect-timeout now bounds the announce dial (unit-tested). This stays partial because there is still no dedicated reference-vs-Go conformance fixture for UDP tracker wire behavior offline."
     },
     {
       "id": "bt.tracker-policy",
@@ -735,15 +740,17 @@
         "internal/engine/bt_download.go:1059",
         "internal/engine/bt_download.go:1667"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/bt_parity_test.go:226"
+      ],
       "unit_coverage": [],
-      "notes": "A post-completion seed loop exists and honors seed-ratio and seed-time. This remains partial because there is no cross-binary conformance yet and stricter parity for bt-stop-timeout and bt-detach-seed-only is still unproven."
+      "notes": "aria2go now actually serves piece data as a seeder (unchokes on Interested, honors choke state), proven cross-binary by an aria2go-seeder to aria2c-leecher transfer; the post-completion seed loop honors seed-ratio and seed-time. Stays partial because bt-stop-timeout and bt-detach-seed-only behavior is not yet conformance-isolated."
     },
     {
       "id": "bt.encryption-runtime",
       "area": "BitTorrent",
       "feature": "BitTorrent MSE/PE runtime behavior",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/usage_text.h",
         "source-truth/aria2/src/DefaultPieceStorage.cc",
@@ -754,12 +761,15 @@
         "internal/protocol/bittorrent/peer/peer.go:200",
         "internal/engine/bt_download.go:793"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/bt_parity_test.go:184",
+        "test/conformance/bt_parity_test.go:226"
+      ],
       "unit_coverage": [
         "internal/mse/mse_test.go:18",
         "internal/mse/mse_test.go:62"
       ],
-      "notes": "Outbound MSE is wired. Incoming peer listener and full aria2 option semantics are not covered."
+      "notes": "Conformance covers encrypted transfers in both directions with bt-require-crypto: aria2c seeder to aria2go leecher and aria2go seeder to aria2c leecher, exercising both outbound and inbound MSE handshakes. Fine-grained bt-min-crypto-level negotiation edges remain unverified but the runtime crypto path is proven."
     },
     {
       "id": "bt.utp-runtime",
@@ -845,14 +855,15 @@
         "internal/engine/engine.go:3854"
       ],
       "conformance_coverage": [
-        "test/conformance/http_tls_test.go:19"
+        "test/conformance/http_tls_test.go:19",
+        "test/conformance/http_clientcert_test.go:158"
       ],
       "unit_coverage": [
         "internal/engine/engine_net_test.go:54",
         "internal/tlsx/pkcs12_test.go:12",
         "internal/tlsx/pkcs12_test.go:29"
       ],
-      "notes": "Conformance covers check-certificate=false, custom CA trust, and min-tls-version where the fixture can observe it. Client certificate/private-key behavior and some TLS 1.3 paths are still unit-covered or environment-limited, so this row stays partial."
+      "notes": "Conformance covers check-certificate=false, custom CA trust, and min-tls-version where the fixture can observe it. A mutual-TLS client-certificate (certificate + private-key) conformance test exists but is environment-skipped on AppleTLS aria2c builds; it runs on OpenSSL/GnuTLS builds. Row stays partial on macOS reference builds."
     },
     {
       "id": "download.http-range-split",
@@ -1089,10 +1100,12 @@
         "internal/engine/engine.go:725"
       ],
       "conformance_coverage": [
-        "test/conformance/download_test.go:474"
+        "test/conformance/download_test.go:474",
+        "test/conformance/input_errors_test.go:92",
+        "test/conformance/input_errors_test.go:121"
       ],
       "unit_coverage": [],
-      "notes": "Missing input files now fail like aria2 in conformance. Unreadable-file timing and diagnostic parity remain partial."
+      "notes": "Missing input files fail like aria2; empty and comment-only input files exit 0 on both binaries. Documented divergence: a chmod-0000 unreadable input file exits 0 in aria2c (silently treated as no entries) but exits 1 in aria2go, which intentionally surfaces the I/O error. Row stays partial for that one edge."
     },
     {
       "id": "download.deferred-input",
@@ -1206,7 +1219,7 @@
       ],
       "conformance_coverage": [],
       "unit_coverage": [],
-      "notes": "Options parse, but the HTTP driver has no pipelining mode."
+      "notes": "Options parse, but the HTTP driver has no pipelining mode. Documented as a deliberate, infeasible gap: HTTP/1.1 pipelining is disabled by default in aria2 (enable-http-pipelining defaults to false), Go's net/http transport cannot pipeline requests (one request per connection, or HTTP/2 multiplexing), the behavior is superseded by HTTP/2, and it is not observable in an offline black-box conformance test. Kept missing rather than implemented as a no-op."
     },
     {
       "id": "download.lowest-speed-limit",
@@ -1337,10 +1350,12 @@
         "test/conformance/config_behavior_matrix_test.go:63",
         "test/conformance/http_edge_matrix_test.go:231",
         "test/conformance/http_edge_matrix_test.go:265",
-        "test/conformance/http_edge_matrix_test.go:412"
+        "test/conformance/http_edge_matrix_test.go:412",
+        "test/conformance/ftp_proxy_test.go:18",
+        "test/conformance/ftp_proxy_test.go:60"
       ],
       "unit_coverage": [],
-      "notes": "HTTP proxy routing covers env/option all-proxy use, default plain-HTTP absolute-form GET, explicit tunnel CONNECT, and no-proxy bypass of invalid proxy env. FTP/SFTP proxy parity and the full proxy option family remain partial."
+      "notes": "HTTP proxy routing (all-proxy use, plain-HTTP absolute-form GET, tunnel CONNECT, no-proxy bypass) and ftp-proxy-specific GET plus isolation are conformance-covered. SFTP proxy (offline SFTP fixture not ready) and the full proxy option family remain partial."
     },
     {
       "id": "download.network-socket-options",
@@ -1357,14 +1372,17 @@
         "internal/netx/dialer.go:357",
         "internal/netx/dialer.go:396"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/net_socket_options_test.go:20",
+        "test/conformance/net_socket_options_test.go:58"
+      ],
       "unit_coverage": [
         "internal/engine/engine_net_test.go:11",
         "internal/netx/dialer_test.go:521",
         "internal/netx/dialer_test.go:537",
         "internal/netx/dialer_test.go:1038"
       ],
-      "notes": "Engine dialer config wires interface and multiple-interface binding, hard disable-ipv6, DSCP, and socket receive buffer options into the net dialer. This stays partial because real interface-binding behavior still lacks cross-binary conformance coverage."
+      "notes": "Conformance covers disable-ipv6 for HTTP and FTP (both binaries succeed against a 127.0.0.1-only fixture). DSCP marking, socket-recv-buffer sizing, and interface/multiple-interface binding are wired and unit-covered but cannot be asserted black-box offline, so this row stays partial."
     },
     {
       "id": "net.async-dns-runtime",
@@ -1381,39 +1399,49 @@
         "internal/netx/dialer.go:446",
         "internal/netx/dialer.go:732"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/net_async_dns_test.go:117",
+        "test/conformance/net_async_dns_test.go:154",
+        "test/conformance/net_async_dns_test.go:193"
+      ],
       "unit_coverage": [
         "internal/netx/dialer_test.go:27",
         "internal/netx/dialer_test.go:59",
         "internal/netx/dialer_test.go:176"
       ],
-      "notes": "Dialer runtime tests cover async resolver construction, live async lookup, and enable-async-dns6 gating when IPv6 is unavailable or disable-ipv6/prefer-ipv4 is set. Reference-vs-Go conformance coverage has not been added yet."
+      "notes": "Conformance covers async-dns enabled with an IP target, async-dns=false fallback parity, and async-dns-server flag acceptance. Two documented gaps keep this partial: enable-async-dns6 is a deprecated no-op in aria2c (logged via A2_LOG_WARN, value discarded) but is honored in aria2go; and custom async-dns-server resolution cannot be black-box tested because c-ares only queries port 53 (no ephemeral-port DNS fixture)."
     },
     {
       "id": "download.dry-run",
       "area": "Download",
       "feature": "dry-run probe behavior without writing payload files",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/usage_text.h",
-        "source-truth/aria2/src/HttpResponseCommand.cc"
+        "source-truth/aria2/src/HttpResponseCommand.cc",
+        "source-truth/aria2/src/FtpNegotiationCommand.cc",
+        "source-truth/aria2/src/SftpNegotiationCommand.cc"
       ],
       "evidence": [
         "cmd/aria2go/main.go:245",
-        "internal/engine/engine.go:2880",
+        "internal/engine/engine.go:3504",
+        "internal/engine/engine.go:4201",
         "internal/protocol/http/downloader.go:130"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/dryrun_test.go:16",
+        "test/conformance/dryrun_test.go:77"
+      ],
       "unit_coverage": [
         "internal/engine/engine_test.go:803"
       ],
-      "notes": "Dry-run is wired for HTTP-style probe paths and engine completion, but it is not yet covered by reference-vs-Go conformance across protocols."
+      "notes": "Dry-run now probes the server (HTTP HEAD, FTP SIZE, SFTP stat) and completes without writing the payload, matching aria2; a dead URL fails on both binaries with equal exit codes. Conformance covers HTTP probe-success-no-file and dead-URL parity; FTP/SFTP share the same probe-then-complete path. Metadata (torrent/metalink/magnet) dry-run still short-circuits to success."
     },
     {
       "id": "ftp.advanced-options",
       "area": "FTP",
       "feature": "ftp-type, ftp-reuse-connection, proxy-method, and advanced FTP behavior",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/usage_text.h",
         "source-truth/aria2/src/FtpDownloadCommand.cc",
@@ -1432,12 +1460,14 @@
         "test/conformance/protocol_download_test.go:160",
         "test/conformance/protocol_download_test.go:184",
         "test/conformance/protocol_download_test.go:214",
-        "test/conformance/protocol_download_test.go:262"
+        "test/conformance/protocol_download_test.go:262",
+        "test/conformance/ftp_reuse_test.go:22",
+        "test/conformance/ftp_reuse_test.go:81"
       ],
       "unit_coverage": [
         "internal/protocol/ftp/conn_test.go:568"
       ],
-      "notes": "ftp-type, passive and active RETR paths, SIZE-unsupported fallback, and percent-decoded paths are covered against aria2c, and proxy GET/tunnel behavior is covered by conformance. ftp-reuse-connection and the broader FTP auth/proxy surface remain partial."
+      "notes": "Conformance covers ftp-type, passive/active RETR, SIZE-unsupported fallback, percent-decoded paths, proxy GET/tunnel, and ftp-reuse-connection (control connection reused across two sequential downloads with equal accept counts to aria2c). Exotic FTP auth edge cases are not separately claimed."
     },
     {
       "id": "sftp.keys-agent",
@@ -1460,9 +1490,10 @@
         "internal/ssh/agent/agent_test.go:14",
         "internal/ssh/keys/parse_test.go:122",
         "internal/ssh/keys/parse_test.go:137",
-        "internal/ssh/keys/parse_test.go:155"
+        "internal/ssh/keys/parse_test.go:155",
+        "internal/protocol/sftp/sftp_encrypted_key_test.go:49"
       ],
-      "notes": "SSH agent support and encrypted-key parsing are wired and unit-covered, but this currently extends aria2go beyond the strict SFTP conformance surface. There is still no reference-vs-Go fixture for key-auth or passphrase prompting, so this row remains partial."
+      "notes": "SSH agent support, encrypted-key parsing, and encrypted private-key passphrase auth are wired and unit-covered. This extends aria2go beyond aria2, which supports only SFTP password auth (no SSH key/agent auth), so cross-binary conformance is impossible by construction; the row stays partial as a deliberate, documented extension."
     },
     {
       "id": "metalink.single-http-download",
@@ -1506,12 +1537,17 @@
       ],
       "conformance_coverage": [
         "test/conformance/metalink_options_test.go:64",
-        "test/conformance/metalink_options_test.go:112"
+        "test/conformance/metalink_options_test.go:112",
+        "test/conformance/metalink_filter_test.go:127",
+        "test/conformance/metalink_filter_test.go:174",
+        "test/conformance/metalink_filter_test.go:211",
+        "test/conformance/metalink_filter_test.go:289",
+        "test/conformance/metalink_filter_test.go:320"
       ],
       "unit_coverage": [
         "internal/protocol/metalink/metalink_test.go:125"
       ],
-      "notes": "Conformance covers metalink base-URI resolution and mirror fallback to a later URL. Full aria2 filter, server-count, and protocol-selection semantics remain partial."
+      "notes": "Conformance covers base-URI resolution, mirror fallback, and metalink-language/os/version file selection (show-files and download) matching aria2c. Remains partial because metalink-enable-unique-protocol exclusion and per-file server-count (maxconnections) are not yet enforced by the engine."
     },
     {
       "id": "metalink.hash-verification",
@@ -1527,10 +1563,12 @@
         "internal/engine/engine.go:3991"
       ],
       "conformance_coverage": [
-        "test/conformance/metalink_options_test.go:158"
+        "test/conformance/metalink_options_test.go:158",
+        "test/conformance/integrity_piece_test.go:93",
+        "test/conformance/integrity_piece_test.go:249"
       ],
       "unit_coverage": [],
-      "notes": "Conformance covers file-hash failure for Metalink downloads. Piece-hash and broader verification surface remain partial."
+      "notes": "Conformance covers Metalink whole-file-hash failure plus piece-hash verification (bad pieces are rejected, good pieces succeed, byte-identical output). Documented divergence keeps this partial: aria2c retries a failed piece from another mirror (DL_RETRY_EX) and exits 1 after retries, while aria2go fails immediately with the checksum exit code 32."
     },
     {
       "id": "metalink.show-files",
@@ -1616,18 +1654,21 @@
       "conformance_coverage": [
         "test/conformance/download_test.go:87",
         "test/conformance/download_test.go:117",
-        "test/conformance/download_test.go:310"
+        "test/conformance/download_test.go:310",
+        "test/conformance/progress_conformance_test.go:293",
+        "test/conformance/progress_conformance_test.go:341",
+        "test/conformance/progress_conformance_test.go:396"
       ],
       "unit_coverage": [
         "internal/console/console_test.go:142"
       ],
-      "notes": "Result suppression/routing and the show-console-readout interaction with summary emission are covered. truncate-console-readout and broader console formatting parity remain partial."
+      "notes": "Conformance covers result suppression/routing, show-console-readout/summary interaction, and download-result hide/full/default (percent column) parity. truncate-console-readout, human-readable byte formatting, and enable-color wiring remain partial."
     },
     {
       "id": "progress.summary-interval",
       "area": "Progress",
       "feature": "--summary-interval timing",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/usage_text.h",
         "source-truth/aria2/src/ConsoleStatCalc.cc"
@@ -1637,12 +1678,15 @@
         "internal/engine/engine.go:1776"
       ],
       "conformance_coverage": [
-        "test/conformance/download_test.go:117"
+        "test/conformance/download_test.go:117",
+        "test/conformance/progress_conformance_test.go:109",
+        "test/conformance/progress_conformance_test.go:160",
+        "test/conformance/progress_conformance_test.go:208"
       ],
       "unit_coverage": [
         "internal/console/console_test.go:397"
       ],
-      "notes": "Conformance covers the 0-vs-1 second interaction with show-console-readout, and console unit tests cover interval gating across renders. Broader end-to-end timing parity remains partial."
+      "notes": "Conformance covers the summary banner exact text appearing with --summary-interval=1 during a blocking download, no banner with --summary-interval=0 plus readout off, and cross-binary agreement on banner presence/absence; console unit tests cover interval gating across renders."
     },
     {
       "id": "cli.help-version",
@@ -1735,12 +1779,15 @@
         "cmd/aria2go/rlimit_unix.go:14",
         "internal/engine/engine.go:197"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/lifecycle_conformance_test.go:475",
+        "test/conformance/lifecycle_conformance_test.go:530"
+      ],
       "unit_coverage": [
         "cmd/aria2go/main_test.go:500",
         "internal/config/defaults_test.go:148"
       ],
-      "notes": "rlimit and daemon parse/wiring exist, but daemon behavior, startup-idle-time semantics, and selectable event-poll backend parity are not conformance-proven."
+      "notes": "Conformance covers lowest-speed-limit abort timing and exit-code parity (the startup-idle-time grace feeds this guard). Stays partial: --startup-idle-time is a hidden CLI option that aria2c rejects (exit 28) while aria2go accepts it; daemon double-fork detachment and selectable event-poll backends are not behaviorally testable offline."
     },
     {
       "id": "lifecycle.shutdown-session-signals",
@@ -1760,10 +1807,11 @@
       ],
       "conformance_coverage": [
         "test/conformance/session_test.go:283",
-        "test/conformance/session_test.go:346"
+        "test/conformance/session_test.go:346",
+        "test/conformance/lifecycle_conformance_test.go:214"
       ],
       "unit_coverage": [],
-      "notes": "Signal-driven shutdown now preserves active and waiting session entries on exit. Staged signal escalation and broader shutdown-path parity remain partial."
+      "notes": "Signal-driven shutdown preserves active and waiting entries and saves them in matching order (active before waiting) on SIGTERM. Stays partial: with the RPC saveSession path, aria2c serializes an unstarted download via unfinishedResults (before active) while aria2go writes active-before-waiting; staged signal escalation is also unverified."
     },
     {
       "id": "hooks.basic-events",
@@ -1976,18 +2024,19 @@
         "internal/config/options.go:179"
       ],
       "conformance_coverage": [
-        "test/conformance/rpc_deep_matrix_test.go:449"
+        "test/conformance/rpc_deep_matrix_test.go:449",
+        "test/conformance/rpc_parity_messages_test.go:35"
       ],
       "unit_coverage": [
         "internal/engine/engine_rpc_test.go:71"
       ],
-      "notes": "Conformance exercises secure HTTP and secure WebSocket transport with rpc-certificate. The rpc-private-key PEM path is still covered only by engine tests, so this row remains partial."
+      "notes": "Conformance exercises secure HTTP and secure WebSocket transport with rpc-certificate. A separate rpc-certificate + rpc-private-key PEM-pair conformance test exists but is environment-skipped on AppleTLS aria2c builds (which manage trust via the OS keychain), so this row remains partial on macOS reference builds; it runs on OpenSSL/GnuTLS builds."
     },
     {
       "id": "rpc.transports",
       "area": "RPC",
       "feature": "JSON-RPC HTTP POST/GET JSONP, XML-RPC, batch, multicall, WebSocket notifications",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/RpcMethodImpl.cc"
       ],
@@ -2009,12 +2058,13 @@
         "test/conformance/rpc_deep_matrix_test.go:372",
         "test/conformance/rpc_deep_matrix_test.go:449",
         "test/conformance/rpc_deep_matrix_test.go:475",
-        "test/conformance/rpc_test.go:1061"
+        "test/conformance/rpc_test.go:1061",
+        "test/conformance/rpc_parity_messages_test.go:214"
       ],
       "unit_coverage": [
         "internal/rpc/transport/server_test.go:74"
       ],
-      "notes": "HTTP POST, GET JSONP, XML-RPC, multicall, WebSocket notifications, fragmented WebSocket messages, and oversized-request abort behavior are conformance-covered. XML-RPC uploaded-metadata normalization exists in the transport layer but is not covered against aria2c, so this row remains partial."
+      "notes": "HTTP POST, GET JSONP, XML-RPC, multicall, WebSocket notifications, fragmented WebSocket messages, oversized-request abort, and XML-RPC uploaded-metadata normalization (addTorrent via base64 element returns a valid GID with a working tellStatus, matching aria2c) are all conformance-covered."
     },
     {
       "id": "rpc.batch-error-shapes",
@@ -2059,7 +2109,7 @@
         "test/conformance/rpc_test.go:629"
       ],
       "unit_coverage": [],
-      "notes": "Go stores reduced stopped records, so stopped tellStatus/getFiles/getUris responses do not preserve the full source-truth file/result surface."
+      "notes": "Stopped tellStatus now omits the seeder key for terminal statuses, matching aria2's gatherStoppedDownload (verified against RpcMethodImpl.cc). Stays partial because Go stores reduced stopped records: the bittorrent metadata dict and the full file/URI/bitfield surface are not preserved for stopped downloads."
     },
     {
       "id": "rpc.parameter-validation-edges",
@@ -2090,7 +2140,7 @@
       "id": "rpc.option-validation",
       "area": "RPC",
       "feature": "RPC option validation parity",
-      "status": "partial",
+      "status": "implemented",
       "source_truth": [
         "source-truth/aria2/src/RpcMethodImpl.cc",
         "source-truth/aria2/src/option_processing.cc"
@@ -2101,11 +2151,13 @@
         "internal/rpc/dispatcher/dispatcher.go:1186",
         "internal/config/handlers.go:11"
       ],
-      "conformance_coverage": [],
+      "conformance_coverage": [
+        "test/conformance/rpc_parity_messages_test.go:283"
+      ],
       "unit_coverage": [
         "internal/rpc/dispatcher/dispatcher_test.go:1495"
       ],
-      "notes": "RPC maps can bypass normal config validation and silently ignore/coerce invalid values."
+      "notes": "Conformance covers changeGlobalOption/addUri option validation edges against aria2c: invalid numeric and invalid enum values (max-concurrent-downloads, bt-min-crypto-level, log-level) return the same error code and message, split=0 is rejected, and unknown options are silently ignored, all matching aria2c."
     },
     {
       "id": "rpc.change-global-runtime-effects",

@@ -63,12 +63,14 @@ type peerState struct {
 	ulBytes        int64
 	lastULSnapshot int64
 
-	outstanding   int
-	connectedAt   time.Time
-	lastRateCheck time.Time
-	pexID         uint8
-	amChoking     bool
-	peerChoking   bool
+	outstanding    int
+	connectedAt    time.Time
+	lastRateCheck  time.Time
+	pexID          uint8
+	amChoking      bool
+	peerChoking    bool
+	amInterested   bool // true once we've sent Interested to this peer
+	peerInterested bool // true when the remote peer has sent Interested to us
 }
 
 func (p *peerState) hasPiece(idx int) bool {
@@ -526,6 +528,21 @@ func (s *btSwarm) handleMsg(msg peerMsg) {
 		s.mu.Lock()
 		msg.src.peerChoking = false
 		s.mu.Unlock()
+	case btpeer.MsgInterested:
+		// Remote peer wants pieces from us.  Unchoke them immediately if we
+		// still have capacity; doChoke() will rebalance on its next tick.
+		s.mu.Lock()
+		msg.src.peerInterested = true
+		if msg.src.amChoking {
+			if msg.src.conn.Unchoke() == nil {
+				msg.src.amChoking = false
+			}
+		}
+		s.mu.Unlock()
+	case btpeer.MsgNotInterested:
+		s.mu.Lock()
+		msg.src.peerInterested = false
+		s.mu.Unlock()
 	case btpeer.MsgBitfield:
 		s.mu.Lock()
 		bf := msg.msg.Payload
@@ -598,7 +615,16 @@ func (s *btSwarm) handleExtended(msg peerMsg) {
 	if s.discoveryCh == nil {
 		return
 	}
+	// Per aria2 UTPexExtensionMessage::doReceivedAction, both fresh (added)
+	// AND dropped peers are added to peer storage so they can be re-contacted.
 	for _, peer := range pex.Added {
+		addr := net.JoinHostPort(peer.IP.String(), strconv.Itoa(int(peer.Port)))
+		select {
+		case s.discoveryCh <- addr:
+		default:
+		}
+	}
+	for _, peer := range pex.Dropped {
 		addr := net.JoinHostPort(peer.IP.String(), strconv.Itoa(int(peer.Port)))
 		select {
 		case s.discoveryCh <- addr:
@@ -745,7 +771,12 @@ func (e *Engine) runBTDownload(ctx context.Context, rg *requestGroup, torrentDat
 		}
 		adaptor = mf
 	} else {
-		if rg.opts.AllowOverwrite && !rg.opts.Continue && !e.controlLoaded(rg) {
+		// Truncate the destination only when we are truly starting fresh
+		// (AllowOverwrite=true, not resuming, no control file).  Skip the
+		// truncate when bt-seed-unverified is set: in that case the file is
+		// already on disk and we are acting as a seeder – clearing it would
+		// destroy the data we are supposed to serve.
+		if rg.opts.AllowOverwrite && !rg.opts.Continue && !e.controlLoaded(rg) && !rg.opts.BTSeedUnverified {
 			if truncErr := os.Truncate(outPath, 0); truncErr != nil && !os.IsNotExist(truncErr) {
 				e.log.Error("BT disk truncate failed", "gid", rg.gid, "error", truncErr)
 				rg.errCode = core.ExitFileIOError
@@ -785,6 +816,16 @@ func (e *Engine) runBTDownload(ctx context.Context, rg *requestGroup, torrentDat
 	e.applyControlBitfield(rg, adaptor)
 	for i, wanted := range wantedPieces {
 		if !wanted {
+			adaptor.MarkPiece(i, true)
+		}
+	}
+
+	// When bt-seed-unverified is set, treat the existing file as fully
+	// downloaded without hash-checking pieces.  Mark all pieces complete so
+	// that downloadLoop sees the torrent as finished immediately and proceeds
+	// directly to seedLoop, which lets us serve piece data to leechers.
+	if rg.opts.BTSeedUnverified {
+		for i := 0; i < numPieces; i++ {
 			adaptor.MarkPiece(i, true)
 		}
 	}
@@ -1359,6 +1400,18 @@ func (s *btSwarm) requestPieces() {
 
 	endgame := s.endgameMode()
 	for _, p := range s.peers {
+		// Check if peer has anything we need; send Interested if not already sent.
+		_, hasPiece := s.choosePieceLocked(p)
+		if hasPiece && !p.amInterested {
+			if p.conn.Interested() == nil {
+				p.amInterested = true
+			}
+		}
+
+		// Cannot request pieces from a choking peer.
+		if p.peerChoking {
+			continue
+		}
 		if p.outstanding >= btMaxPendingRequests {
 			continue
 		}
@@ -1390,7 +1443,7 @@ func (s *btSwarm) requestPieces() {
 				if q == p || q.outstanding >= btMaxPendingRequests*2 {
 					continue
 				}
-				if q.hasPiece(pieceIdx) {
+				if !q.peerChoking && q.hasPiece(pieceIdx) {
 					q.conn.Request(pieceIdx, 0, blockLen)
 					q.outstanding++
 				}

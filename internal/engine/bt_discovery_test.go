@@ -104,3 +104,42 @@ func TestBTTrackerTimeoutParsesOption(t *testing.T) {
 		t.Fatalf("btTrackerTimeout() = %v, want 12s", got)
 	}
 }
+
+// TestBTTrackerConnectTimeoutParsesOption verifies that btTrackerConnectTimeout
+// reads bt-tracker-connect-timeout and falls back to 60 s when absent.
+func TestBTTrackerConnectTimeoutParsesOption(t *testing.T) {
+	if got := btTrackerConnectTimeout(&config.Options{BTTrackerConnectTimeout: "30"}); got != 30*time.Second {
+		t.Fatalf("btTrackerConnectTimeout(30) = %v, want 30s", got)
+	}
+	if got := btTrackerConnectTimeout(&config.Options{BTTrackerConnectTimeout: "0"}); got != 60*time.Second {
+		t.Fatalf("btTrackerConnectTimeout(0) = %v, want 60s default", got)
+	}
+	if got := btTrackerConnectTimeout(&config.Options{}); got != 60*time.Second {
+		t.Fatalf("btTrackerConnectTimeout(empty) = %v, want 60s default", got)
+	}
+	if got := btTrackerConnectTimeout(nil); got != 60*time.Second {
+		t.Fatalf("btTrackerConnectTimeout(nil) = %v, want 60s default", got)
+	}
+}
+
+// TestAnnounceTrackerAppliesConnectTimeout checks that announceTracker uses
+// the bt-tracker-connect-timeout option to bound tracker announce calls.
+// When the timeout is very short and the tracker does not respond, the call
+// should fail within that bound rather than waiting indefinitely.
+func TestAnnounceTrackerAppliesConnectTimeout(t *testing.T) {
+	e, err := New(testOpts(), testLogger(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Set a very short connect timeout so the announce will time out quickly.
+	e.cfg.BTTrackerConnectTimeout = "1"
+
+	// Use an unreachable address that will cause a connection timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, announceErr := e.announceTracker(ctx, "udp://192.0.2.1:9/announce", tracker.AnnounceRequest{})
+	if announceErr == nil {
+		t.Fatal("expected error from unreachable tracker, got nil")
+	}
+}

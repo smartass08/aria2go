@@ -130,6 +130,7 @@ type Opts struct {
 type AuthMethods struct {
 	Password    string
 	KeyFile     string
+	KeyPassphrase string
 	AgentSocket string
 }
 
@@ -193,7 +194,7 @@ func Open(ctx context.Context, dialer *netx.Dialer, opts Opts) (*Session, error)
 			tconn.Close()
 			return nil, fmt.Errorf("sftp: read key file: %w", err)
 		}
-		key, err := parsePrivateKey(keyData)
+		key, err := parsePrivateKeyMaybeEncrypted(keyData, opts.Auth.KeyPassphrase)
 		if err != nil {
 			tconn.Close()
 			return nil, fmt.Errorf("sftp: parse key: %w", err)
@@ -901,6 +902,20 @@ func (r *fileReader) Close() error {
 
 func parsePrivateKey(data []byte) (any, error) {
 	key, err := sshkeys.ParsePrivateKey(data)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// parsePrivateKeyMaybeEncrypted parses a PEM-encoded private key, using
+// passphrase to decrypt it when the passphrase is non-empty.  When passphrase
+// is empty the key is assumed to be unencrypted.
+func parsePrivateKeyMaybeEncrypted(data []byte, passphrase string) (any, error) {
+	if passphrase == "" {
+		return parsePrivateKey(data)
+	}
+	key, err := sshkeys.ParsePrivateKeyWithPassphrase(data, []byte(passphrase))
 	if err != nil {
 		return nil, err
 	}

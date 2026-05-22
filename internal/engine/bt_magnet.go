@@ -305,6 +305,29 @@ func (e *Engine) tryLoadSavedMagnetTorrent(ctx context.Context, rg *requestGroup
 		return false, nil
 	}
 
+	// Merge the magnet's tracker URIs into the options so they are used when
+	// the saved torrent's own announce list differs (e.g. different sessions).
+	// This mirrors aria2c's behaviour of unioning the magnet's tr= parameters
+	// with the stored torrent's announce list.
+	if len(m.Trackers) > 0 {
+		existing := make(map[string]bool, len(rg.opts.BTTracker))
+		for _, t := range rg.opts.BTTracker {
+			existing[t] = true
+		}
+		for _, tr := range m.Trackers {
+			if tr != "" && !existing[tr] {
+				rg.opts.BTTracker = append(rg.opts.BTTracker, tr)
+				existing[tr] = true
+			}
+		}
+	}
+
+	// Reset the file path so runBTDownload derives it from the torrent's
+	// info.name and rg.opts.Dir, rather than the stale value derived from
+	// the magnet URI (e.g. the last path segment of a tr= tracker URL).
+	rg.filePath = ""
+	rg.filePathFromURI = false
+
 	e.log.Info("BT metadata loaded from saved torrent", "gid", rg.gid, "path", torrentPath)
 	return true, e.runBTDownload(ctx, rg, torrentData)
 }

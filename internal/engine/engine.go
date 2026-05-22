@@ -3501,8 +3501,13 @@ func (e *Engine) runDownload(rg *requestGroup) {
 	}
 	defer e.finishControlFile(rg)
 
-	if e.cfg.DryRun || rg.opts.DryRun {
-		e.log.Info("dry-run mode, skipping download", "gid", rg.gid)
+	// aria2 dry-run still probes the server for URI-backed transfers (HTTP HEAD,
+	// FTP SIZE, SFTP stat) and fails if the resource is unreachable. Only the
+	// metadata-driven cases short-circuit here; the per-protocol download paths
+	// complete the dry-run after a successful probe.
+	dryRun := e.cfg.DryRun || rg.opts.DryRun
+	if dryRun && (len(rg.torrent) > 0 || len(rg.metalinkData) > 0) {
+		e.log.Info("dry-run mode, skipping metadata download", "gid", rg.gid)
 		if _, ok := e.groups.getLocked(rg.gid); ok {
 			rg.errCode = core.ExitSuccess
 			e.groups.unlock(rg.gid)
@@ -3547,6 +3552,11 @@ func (e *Engine) runDownload(rg *requestGroup) {
 		rg.activeHosts = nil
 	}
 	if strings.HasPrefix(uri, "magnet:?") {
+		if dryRun {
+			rg.errCode = core.ExitSuccess
+			rg.cancel()
+			return
+		}
 		e.runMagnetDownload(ctx, rg, uri)
 		rg.cancel()
 		return
@@ -4199,6 +4209,11 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 	}
 
 	rg.totalLength = size
+	if e.cfg.DryRun || rg.opts.DryRun {
+		rg.errCode = core.ExitSuccess
+		e.log.Info("dry-run: probe succeeded, skipping download", "gid", rg.gid, "uri", uri, "size", size)
+		return
+	}
 	rg.lastSpeedSample = time.Now()
 	e.initControlInfo(rg, outPath, size, rg.integrity.controlPieceLength(0), nil)
 	existingSize := int64(0)
@@ -5250,6 +5265,11 @@ func (e *Engine) runFTPDownload(ctx context.Context, rg *requestGroup, uri strin
 	}
 
 	rg.totalLength = size
+	if e.cfg.DryRun || rg.opts.DryRun {
+		rg.errCode = core.ExitSuccess
+		e.log.Info("dry-run: FTP probe succeeded, skipping download", "gid", rg.gid, "uri", uri, "size", size)
+		return
+	}
 	rg.lastSpeedSample = time.Now()
 	e.initControlInfo(rg, outPath, size, rg.integrity.controlPieceLength(0), nil)
 	offset := e.controlResumeOffset(rg, outPath)
@@ -5429,6 +5449,11 @@ func (e *Engine) runSFTPDownload(ctx context.Context, rg *requestGroup, uri stri
 	size := info.Size
 	lastModified := info.ModTime
 	rg.totalLength = size
+	if e.cfg.DryRun || rg.opts.DryRun {
+		rg.errCode = core.ExitSuccess
+		e.log.Info("dry-run: SFTP probe succeeded, skipping download", "gid", rg.gid, "uri", uri, "size", size)
+		return
+	}
 	rg.lastSpeedSample = time.Now()
 	e.initControlInfo(rg, outPath, size, rg.integrity.controlPieceLength(0), nil)
 	offset := e.controlResumeOffset(rg, outPath)
@@ -6532,10 +6557,19 @@ func (e *Engine) statusToRPC(s *Status, keys []string) map[string]any {
 	}
 	if s.NumSeeders > 0 || s.InfoHash != "" {
 		m["numSeeders"] = fmt.Sprintf("%d", s.NumSeeders)
-		if s.InfoHash != "" && s.TotalLength > 0 && s.CompletedLength >= s.TotalLength {
-			m["seeder"] = "true"
-		} else {
-			m["seeder"] = "false"
+	}
+	// aria2 only emits "seeder" for in-progress downloads (gatherProgressBitTorrent).
+	// gatherStoppedDownload never sets it, so omit it for terminal results.
+	switch s.Status {
+	case core.StatusComplete, core.StatusError, core.StatusRemoved:
+		// no seeder key for stopped downloads
+	default:
+		if s.InfoHash != "" {
+			if s.TotalLength > 0 && s.CompletedLength >= s.TotalLength {
+				m["seeder"] = "true"
+			} else {
+				m["seeder"] = "false"
+			}
 		}
 	}
 	if s.Bitfield != "" {

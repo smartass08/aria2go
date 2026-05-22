@@ -13,8 +13,8 @@ of source-truth prefs that still have no Go option owner.
 
 Current count:
 
-- `implemented`: 30
-- `partial`: 45
+- `implemented`: 38
+- `partial`: 37
 - `missing`: 1
 - `tests-only`: 0
 
@@ -36,18 +36,18 @@ Current count:
 | `bt.local-peer-discovery` | BitTorrent | `partial` | Local Peer Discovery announcements and peer intake |
 | `bt.show-files.torrent` | BitTorrent | `implemented` | Torrent --show-files output |
 | `bt.select-file-index-out` | BitTorrent | `implemented` | Multi-file torrent --select-file and --index-out |
-| `bt.magnet-runtime` | BitTorrent | `partial` | Magnet URI download |
+| `bt.magnet-runtime` | BitTorrent | `implemented` | Magnet URI download |
 | `bt.pause-metadata-runtime` | BitTorrent | `implemented` | pause-metadata runtime behavior for metadata downloads |
 | `bt.ut-metadata` | BitTorrent | `implemented` | BEP 9 / ut_metadata torrent metadata exchange |
 | `bt.dht-peer-discovery` | BitTorrent | `partial` | DHT peer discovery feeding BitTorrent swarms |
-| `config.dht-entry-point-split-host-port` | Config | `partial` | Internal split dht-entry-point host/port prefs |
+| `config.dht-entry-point-split-host-port` | Config | `implemented` | Internal split dht-entry-point host/port prefs |
 | `bt.peer-exchange` | BitTorrent | `partial` | Peer exchange / ut_pex |
 | `bt.tracker-http` | BitTorrent | `implemented` | HTTP tracker announce for local .torrent downloads |
 | `bt.tracker-udp-runtime` | BitTorrent | `partial` | UDP tracker runtime use |
 | `bt.tracker-policy` | BitTorrent | `partial` | Tracker overrides, exclusion, intervals, tiers, completed/stopped announces |
 | `bt.webseed-runtime` | BitTorrent | `partial` | Web seed / url-list data source |
 | `bt.seeding-runtime` | BitTorrent | `partial` | Post-completion seeding, incoming peer listener, seed-ratio and seed-time |
-| `bt.encryption-runtime` | BitTorrent | `partial` | BitTorrent MSE/PE runtime behavior |
+| `bt.encryption-runtime` | BitTorrent | `implemented` | BitTorrent MSE/PE runtime behavior |
 | `bt.utp-runtime` | BitTorrent | `partial` | uTP transport |
 | `bt.remove-unselected-file` | BitTorrent | `implemented` | bt-remove-unselected-file |
 | `download.http-basic` | HTTP | `implemented` | HTTP single-file download |
@@ -75,8 +75,8 @@ Current count:
 | `download.proxy-routing` | Download | `partial` | Proxy option routing and no-proxy bypass behavior |
 | `download.network-socket-options` | Network | `partial` | Interface binding, IPv6 disable, DSCP, and socket receive buffer options |
 | `net.async-dns-runtime` | Network | `partial` | async-dns, enable-async-dns6, and async-dns-server runtime behavior |
-| `download.dry-run` | Download | `partial` | dry-run probe behavior without writing payload files |
-| `ftp.advanced-options` | FTP | `partial` | ftp-type, ftp-reuse-connection, proxy-method, and advanced FTP behavior |
+| `download.dry-run` | Download | `implemented` | dry-run probe behavior without writing payload files |
+| `ftp.advanced-options` | FTP | `implemented` | ftp-type, ftp-reuse-connection, proxy-method, and advanced FTP behavior |
 | `sftp.keys-agent` | SFTP | `partial` | SFTP private-key formats, encrypted keys, and SSH agent |
 | `metalink.single-http-download` | Metalink | `implemented` | CLI --metalink-file HTTP-backed download |
 | `metalink.filters-mirrors` | Metalink | `partial` | Metalink filters, base URI, mirror fallback, server count, and unique protocol |
@@ -85,7 +85,7 @@ Current count:
 | `session.basic-save-load` | Session | `partial` | Basic save-session/load-session lifecycle |
 | `session.save-option-surface` | Session | `partial` | Complete aria2 option preservation in session files |
 | `progress.console-readout` | Progress | `partial` | Console progress and result display controls |
-| `progress.summary-interval` | Progress | `partial` | --summary-interval timing |
+| `progress.summary-interval` | Progress | `implemented` | --summary-interval timing |
 | `cli.help-version` | CLI | `implemented` | CLI help and version output |
 | `cli.config-file-basics` | CLI | `implemented` | conf-path, no-conf, config parsing, CLI precedence |
 | `cli.stop-timers` | CLI | `implemented` | --stop and --stop-with-process |
@@ -101,11 +101,11 @@ Current count:
 | `rpc.add-metalink-multi-gid` | RPC | `implemented` | aria2.addMetalink multi-file enqueue and multi-GID return semantics |
 | `rpc.auth-readonly` | RPC | `implemented` | RPC secret auth and read-only method gating |
 | `rpc.secure-transport` | RPC | `partial` | RPC TLS transport using rpc-secure, rpc-certificate, and rpc-private-key |
-| `rpc.transports` | RPC | `partial` | JSON-RPC HTTP POST/GET JSONP, XML-RPC, batch, multicall, WebSocket notifications |
+| `rpc.transports` | RPC | `implemented` | JSON-RPC HTTP POST/GET JSONP, XML-RPC, batch, multicall, WebSocket notifications |
 | `rpc.batch-error-shapes` | RPC | `implemented` | JSON-RPC and WebSocket batch per-entry error behavior |
 | `rpc.stopped-result-fidelity` | RPC | `partial` | Stopped-result file, URI, bitfield, and status fidelity |
 | `rpc.parameter-validation-edges` | RPC | `partial` | RPC edge-case parameter validation |
-| `rpc.option-validation` | RPC | `partial` | RPC option validation parity |
+| `rpc.option-validation` | RPC | `implemented` | RPC option validation parity |
 | `rpc.change-global-runtime-effects` | RPC | `partial` | changeGlobalOption runtime side effects |
 | `rpc.get-peers` | RPC | `partial` | aria2.getPeers with active BitTorrent peer details |
 

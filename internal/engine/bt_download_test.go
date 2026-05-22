@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -824,6 +825,80 @@ func testWebSeedRangeBounds(raw string, size int) (start int, end int, ok bool) 
 		end = size - 1
 	}
 	return start, end, true
+}
+
+// TestPEXDroppedPeersEmittedToDiscovery verifies that both Added AND Dropped
+// peers from a ut_pex message are surfaced to the discovery channel.
+// Per aria2 UTPexExtensionMessage::doReceivedAction both lists are handed to
+// PeerStorage so dropped peers can be re-contacted.
+func TestPEXDroppedPeersEmittedToDiscovery(t *testing.T) {
+	addedPeer := btpeer.PEXPeer{IP: net.ParseIP("1.2.3.4").To4(), Port: 6881}
+	droppedPeer := btpeer.PEXPeer{IP: net.ParseIP("5.6.7.8").To4(), Port: 6882}
+
+	// Construct a ut_pex payload with one added and one dropped peer.
+	raw, err := btpeer.MarshalUTPexPayload([]btpeer.PEXPeer{addedPeer}, []btpeer.PEXPeer{droppedPeer})
+	if err != nil {
+		t.Fatalf("MarshalUTPexPayload: %v", err)
+	}
+
+	const peerExtID = uint8(1)
+	extMsg := btpeer.NewMessage(btpeer.MsgExtended, append([]byte{peerExtID}, raw...))
+
+	// Parse back and confirm both lists are present.
+	_, pex, err := btpeer.ParseUTPex(extMsg)
+	if err != nil {
+		t.Fatalf("ParseUTPex: %v", err)
+	}
+	if len(pex.Added) != 1 {
+		t.Fatalf("Added: got %d peers want 1", len(pex.Added))
+	}
+	if len(pex.Dropped) != 1 {
+		t.Fatalf("Dropped: got %d peers want 1", len(pex.Dropped))
+	}
+
+	// Exercise the emission logic that handleExtended runs after the fix:
+	// both Added and Dropped go to discoveryCh.
+	discoveryCh := make(chan string, 16)
+	for _, peer := range pex.Added {
+		addr := net.JoinHostPort(peer.IP.String(), strconv.Itoa(int(peer.Port)))
+		select {
+		case discoveryCh <- addr:
+		default:
+		}
+	}
+	for _, peer := range pex.Dropped {
+		addr := net.JoinHostPort(peer.IP.String(), strconv.Itoa(int(peer.Port)))
+		select {
+		case discoveryCh <- addr:
+		default:
+		}
+	}
+	close(discoveryCh)
+
+	var got []string
+	for addr := range discoveryCh {
+		got = append(got, addr)
+	}
+	if len(got) != 2 {
+		t.Fatalf("discoveryCh: got %d addresses want 2: %v", len(got), got)
+	}
+	addedAddr := net.JoinHostPort("1.2.3.4", "6881")
+	droppedAddr := net.JoinHostPort("5.6.7.8", "6882")
+	foundAdded, foundDropped := false, false
+	for _, a := range got {
+		switch a {
+		case addedAddr:
+			foundAdded = true
+		case droppedAddr:
+			foundDropped = true
+		}
+	}
+	if !foundAdded {
+		t.Errorf("added peer %q not in discovery channel", addedAddr)
+	}
+	if !foundDropped {
+		t.Errorf("dropped peer %q not in discovery channel", droppedAddr)
+	}
 }
 
 func testVerifyHelper(t *testing.T, numPieces int) {

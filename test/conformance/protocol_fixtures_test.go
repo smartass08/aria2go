@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -268,6 +269,7 @@ type protocolFTPFixture struct {
 	files    map[string][]byte
 	commands []protocolFTPCommand
 
+	acceptCount int64 // incremented atomically on each accepted connection
 	supportSize bool
 	modTime     time.Time
 }
@@ -353,6 +355,12 @@ func (f *protocolFTPFixture) record(cmd, arg string) {
 	f.mu.Unlock()
 }
 
+// AcceptCount returns the number of control connections accepted so far.
+// It is safe to call concurrently from test goroutines.
+func (f *protocolFTPFixture) AcceptCount() int64 {
+	return atomic.LoadInt64(&f.acceptCount)
+}
+
 func (f *protocolFTPFixture) serve(ctx context.Context) {
 	for {
 		conn, err := f.ln.Accept()
@@ -364,6 +372,7 @@ func (f *protocolFTPFixture) serve(ctx context.Context) {
 				continue
 			}
 		}
+		atomic.AddInt64(&f.acceptCount, 1)
 		go f.handleConn(ctx, conn)
 	}
 }

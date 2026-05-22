@@ -232,6 +232,20 @@ func btTrackerInterval(opts *config.Options) time.Duration {
 	return 0
 }
 
+// btTrackerConnectTimeout returns the connect timeout for tracker TCP/UDP
+// dial from the bt-tracker-connect-timeout option (default 60 s).  This
+// mirrors aria2's behaviour where PREF_BT_TRACKER_CONNECT_TIMEOUT overrides
+// PREF_CONNECT_TIMEOUT specifically for tracker announces.
+func btTrackerConnectTimeout(opts *config.Options) time.Duration {
+	if opts == nil {
+		return 60 * time.Second
+	}
+	if n, err := strconv.Atoi(opts.BTTrackerConnectTimeout); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 60 * time.Second
+}
+
 func btTrackerCryptoSupport(opts *config.Options) string {
 	if opts == nil {
 		return ""
@@ -534,6 +548,16 @@ func (e *Engine) announceTracker(ctx context.Context, rawURL string, req tracker
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("tracker: parse %q: %w", rawURL, err)
+	}
+	// Apply bt-tracker-connect-timeout as a deadline on the overall announce
+	// when it is configured. This mirrors the aria2 C++ behaviour where
+	// PREF_BT_TRACKER_CONNECT_TIMEOUT overrides PREF_CONNECT_TIMEOUT for
+	// tracker connections (TrackerWatcherCommand.cc ~385).
+	connectTimeout := btTrackerConnectTimeout(e.cfg)
+	if connectTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, connectTimeout)
+		defer cancel()
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "udp":
