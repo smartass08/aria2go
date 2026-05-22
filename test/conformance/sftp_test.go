@@ -84,6 +84,49 @@ func TestSFTPHostKeyDigestParity(t *testing.T) {
 	})
 }
 
+func TestSFTPPercentDecodedPathParity(t *testing.T) {
+	sftpSkipIfNoReference(t)
+
+	const name = "space # file.bin"
+	payload := sftpPayload("percent-decoded-path", 40*1024+11)
+	refFixture := startSFTPFixture(t, map[string][]byte{"/" + name: payload})
+	implFixture := startSFTPFixture(t, map[string][]byte{"/" + name: payload})
+
+	refDir := t.TempDir()
+	implDir := t.TempDir()
+	ref := sftpRun(t, true, sftpArgs(refDir, "", refFixture.URL("/"+name)))
+	impl := sftpRun(t, false, sftpArgs(implDir, "", implFixture.URL("/"+name)))
+
+	AssertEqualExit(t, ref, impl)
+	sftpRequireExitZero(t, "ref SFTP percent-decoded path", ref)
+	sftpRequireExitZero(t, "impl SFTP percent-decoded path", impl)
+	sftpRequireFile(t, filepath.Join(refDir, name), payload)
+	sftpRequireFile(t, filepath.Join(implDir, name), payload)
+	sftpRequireRequestedPath(t, "ref SFTP percent-decoded path", refFixture, "/"+name)
+	sftpRequireRequestedPath(t, "impl SFTP percent-decoded path", implFixture, "/"+name)
+}
+
+func TestSFTPRemoteTimeParity(t *testing.T) {
+	sftpSkipIfNoReference(t)
+
+	payload := sftpPayload("remote-time", 52*1024+5)
+	refFixture := startSFTPFixture(t, map[string][]byte{"/remote-time.bin": payload})
+	implFixture := startSFTPFixture(t, map[string][]byte{"/remote-time.bin": payload})
+
+	refDir := t.TempDir()
+	implDir := t.TempDir()
+	ref := sftpRun(t, true, sftpArgs(refDir, "remote-time.bin", refFixture.URL("/remote-time.bin"), "--remote-time=true"))
+	impl := sftpRun(t, false, sftpArgs(implDir, "remote-time.bin", implFixture.URL("/remote-time.bin"), "--remote-time=true"))
+
+	AssertEqualExit(t, ref, impl)
+	sftpRequireExitZero(t, "ref SFTP remote-time", ref)
+	sftpRequireExitZero(t, "impl SFTP remote-time", impl)
+	sftpRequireFile(t, filepath.Join(refDir, "remote-time.bin"), payload)
+	sftpRequireFile(t, filepath.Join(implDir, "remote-time.bin"), payload)
+	conformanceRequireFileModTimeNear(t, "ref SFTP remote-time", filepath.Join(refDir, "remote-time.bin"), time.Unix(sftpFixtureMTime, 0).UTC())
+	conformanceRequireFileModTimeNear(t, "impl SFTP remote-time", filepath.Join(implDir, "remote-time.bin"), time.Unix(sftpFixtureMTime, 0).UTC())
+}
+
 func sftpSkipIfNoReference(t *testing.T) {
 	t.Helper()
 	if _, err := findRefBinary(); err != nil {
@@ -131,7 +174,6 @@ func sftpArgs(dir, out, uri string, extra ...string) []string {
 	args := []string{
 		"--no-conf=true",
 		"--dir=" + dir,
-		"--out=" + out,
 		"--allow-overwrite=true",
 		"--auto-file-renaming=false",
 		"--file-allocation=none",
@@ -142,6 +184,9 @@ func sftpArgs(dir, out, uri string, extra ...string) []string {
 		"--max-tries=1",
 		"--connect-timeout=5",
 		"--timeout=5",
+	}
+	if out != "" {
+		args = append(args, "--out="+out)
 	}
 	args = append(args, extra...)
 	args = append(args, uri)

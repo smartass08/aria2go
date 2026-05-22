@@ -102,6 +102,13 @@ func TestHTTPEdge_StatusRetryMatrix(t *testing.T) {
 			wantExit: 0,
 			wantFile: true,
 		},
+		{
+			name:     "504_retries_without_retry_wait",
+			statuses: []int{http.StatusGatewayTimeout},
+			extra:    []string{"--max-tries=3", "--retry-wait=0"},
+			wantExit: 0,
+			wantFile: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -218,6 +225,132 @@ func TestHTTPEdge_GzipAcceptedOutput(t *testing.T) {
 	}
 	if !implFixture.sawAcceptEncoding(httpEdgePathGzip, "gzip") {
 		t.Fatalf("implementation did not send Accept-Encoding: gzip; records=%#v", implFixture.recordsFor(httpEdgePathGzip))
+	}
+}
+
+func TestHTTPEdge_HTTPProxyDefaultMethodUsesAbsoluteGET(t *testing.T) {
+	SkipIfNoRef(t)
+
+	payload := []byte("proxy default method payload\n")
+	refFixture := newHTTPEdgeFixture(t, httpEdgeFixtureOptions{payload: payload})
+	implFixture := newHTTPEdgeFixture(t, httpEdgeFixtureOptions{payload: payload})
+	refProxy := newHTTPEdgeProxyFixture(t)
+	implProxy := newHTTPEdgeProxyFixture(t)
+	refDir, implDir := t.TempDir(), t.TempDir()
+
+	tc := CommandMatrixCase{
+		Name:    "http_proxy_default_method_absolute_get",
+		Timeout: 20 * time.Second,
+		Env:     httpEdgeProxylessEnv(),
+		ArgsFor: func(target RunnerTarget) []string {
+			dir, proxyURL, url := refDir, refProxy.url(), refFixture.url(httpEdgePathPayload)
+			if target == RunnerImpl {
+				dir, proxyURL, url = implDir, implProxy.url(), implFixture.url(httpEdgePathPayload)
+			}
+			args := append(httpEdgeBaseArgs(dir, "proxy-default.bin"), "--all-proxy="+proxyURL)
+			return append(args, url)
+		},
+	}
+	result := RunCommandPair(t, tc)
+
+	AssertEqualExit(t, result.Ref, result.Impl)
+	requireExitSuccess(t, "ref proxy default", result.Ref)
+	requireExitSuccess(t, "impl proxy default", result.Impl)
+	AssertFileBytes(t, filepath.Join(refDir, "proxy-default.bin"), payload)
+	AssertFileBytes(t, filepath.Join(implDir, "proxy-default.bin"), payload)
+	requireProxyAbsoluteGET(t, "reference", refProxy, refFixture.url(httpEdgePathPayload))
+	requireProxyAbsoluteGET(t, "implementation", implProxy, implFixture.url(httpEdgePathPayload))
+}
+
+func TestHTTPEdge_HTTPProxyTunnelMethodUsesCONNECT(t *testing.T) {
+	SkipIfNoRef(t)
+
+	payload := []byte("proxy tunnel method payload\n")
+	refFixture := newHTTPEdgeFixture(t, httpEdgeFixtureOptions{payload: payload})
+	implFixture := newHTTPEdgeFixture(t, httpEdgeFixtureOptions{payload: payload})
+	refProxy := newHTTPEdgeProxyFixture(t)
+	implProxy := newHTTPEdgeProxyFixture(t)
+	refDir, implDir := t.TempDir(), t.TempDir()
+
+	tc := CommandMatrixCase{
+		Name:    "http_proxy_tunnel_method_connect",
+		Timeout: 20 * time.Second,
+		Env:     httpEdgeProxylessEnv(),
+		ArgsFor: func(target RunnerTarget) []string {
+			dir, proxyURL, url := refDir, refProxy.url(), refFixture.url(httpEdgePathPayload)
+			if target == RunnerImpl {
+				dir, proxyURL, url = implDir, implProxy.url(), implFixture.url(httpEdgePathPayload)
+			}
+			args := append(httpEdgeBaseArgs(dir, "proxy-tunnel.bin"),
+				"--all-proxy="+proxyURL,
+				"--proxy-method=tunnel",
+			)
+			return append(args, url)
+		},
+	}
+	result := RunCommandPair(t, tc)
+
+	AssertEqualExit(t, result.Ref, result.Impl)
+	requireExitSuccess(t, "ref proxy tunnel", result.Ref)
+	requireExitSuccess(t, "impl proxy tunnel", result.Impl)
+	AssertFileBytes(t, filepath.Join(refDir, "proxy-tunnel.bin"), payload)
+	AssertFileBytes(t, filepath.Join(implDir, "proxy-tunnel.bin"), payload)
+	requireProxyCONNECT(t, "reference", refProxy)
+	requireProxyCONNECT(t, "implementation", implProxy)
+}
+
+func TestHTTPEdge_EncodedSplitParity(t *testing.T) {
+	SkipIfNoRef(t)
+
+	payload := []byte(strings.Repeat("encoded split parity payload\n", 131072))
+	tests := []struct {
+		name     string
+		path     string
+		token    string
+		out      string
+		wantExit int
+	}{
+		{name: "gzip_split_disabled_for_content_encoding", path: httpEdgePathGzip, token: "gzip", out: "gzip-split.bin", wantExit: 0},
+		{name: "deflate_split_disabled_for_content_encoding", path: httpEdgePathDeflate, token: "deflate", out: "deflate-split.bin", wantExit: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			refFixture := newHTTPEdgeFixture(t, httpEdgeFixtureOptions{payload: payload})
+			implFixture := newHTTPEdgeFixture(t, httpEdgeFixtureOptions{payload: payload})
+			refDir, implDir := t.TempDir(), t.TempDir()
+
+			tc := CommandMatrixCase{
+				Name:    tt.name,
+				Timeout: 30 * time.Second,
+				Env:     httpEdgeProxylessEnv(),
+				ArgsFor: func(target RunnerTarget) []string {
+					dir, url := refDir, refFixture.url(tt.path)
+					if target == RunnerImpl {
+						dir, url = implDir, implFixture.url(tt.path)
+					}
+					args := append(httpEdgeBaseArgs(dir, tt.out),
+						"--http-accept-gzip=true",
+						"--split=4",
+						"--max-connection-per-server=4",
+						"--min-split-size=1M",
+					)
+					return append(args, url)
+				},
+			}
+			result := RunCommandPair(t, tc)
+
+			AssertEqualExit(t, result.Ref, result.Impl)
+			if result.Ref.ExitCode != tt.wantExit {
+				t.Fatalf("reference exit = %d, want %d\nstdout=%s\nstderr=%s", result.Ref.ExitCode, tt.wantExit, result.Ref.Stdout, result.Ref.Stderr)
+			}
+			requireExitSuccess(t, "ref "+tt.name, result.Ref)
+			requireExitSuccess(t, "impl "+tt.name, result.Impl)
+			AssertFileBytes(t, filepath.Join(refDir, tt.out), payload)
+			AssertFileBytes(t, filepath.Join(implDir, tt.out), payload)
+			requireEncodedSplitParity(t, "reference", refFixture, tt.path, tt.token)
+			requireEncodedSplitParity(t, "implementation", implFixture, tt.path, tt.token)
+		})
 	}
 }
 
@@ -373,5 +506,41 @@ func requireCookieFileContains(t *testing.T, path, name, value string) {
 	want := "\t" + name + "\t" + value
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("cookie file %s missing %s=%s:\n%s", path, name, value, string(data))
+	}
+}
+
+func requireProxyAbsoluteGET(t *testing.T, label string, proxy *httpEdgeProxyFixture, rawURL string) {
+	t.Helper()
+
+	if proxy.sawMethod(http.MethodConnect) {
+		t.Fatalf("%s proxy unexpectedly saw CONNECT: %v", label, proxy.methodsAndTargets())
+	}
+	if !proxy.sawAbsoluteGET(rawURL) {
+		t.Fatalf("%s proxy did not see absolute-form GET for %s: %v", label, rawURL, proxy.methodsAndTargets())
+	}
+}
+
+func requireProxyCONNECT(t *testing.T, label string, proxy *httpEdgeProxyFixture) {
+	t.Helper()
+
+	if !proxy.sawMethod(http.MethodConnect) {
+		t.Fatalf("%s proxy did not see CONNECT: %v", label, proxy.methodsAndTargets())
+	}
+}
+
+func requireEncodedSplitParity(t *testing.T, label string, fixture *httpEdgeFixture, path, token string) {
+	t.Helper()
+
+	if !fixture.sawAcceptEncoding(path, token) {
+		t.Fatalf("%s did not send Accept-Encoding: %s; records=%#v", label, token, fixture.recordsFor(path))
+	}
+	if got := fixture.count(path); got == 0 {
+		t.Fatalf("%s sent no requests for %s", label, path)
+	}
+	if !stringSliceContains(fixture.methodsFor(path), http.MethodGet) {
+		t.Fatalf("%s did not send GET for %s; records=%#v", label, path, fixture.recordsFor(path))
+	}
+	if got := fixture.rangeCount(path); got != 0 {
+		t.Fatalf("%s unexpectedly sent Range with content-encoding %s; count=%d records=%#v", label, token, got, fixture.recordsFor(path))
 	}
 }

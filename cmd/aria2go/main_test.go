@@ -16,6 +16,15 @@ import (
 	"github.com/smartass08/aria2go/internal/engine"
 )
 
+func TestPublicExitCodeMapsInternalInProgressSentinel(t *testing.T) {
+	if got := publicExitCode(core.ExitInProgress); got != int(core.ExitUnfinishedDownloads) {
+		t.Fatalf("publicExitCode(ExitInProgress) = %d, want %d", got, core.ExitUnfinishedDownloads)
+	}
+	if got := publicExitCode(core.ExitSuccess); got != int(core.ExitSuccess) {
+		t.Fatalf("publicExitCode(ExitSuccess) = %d, want %d", got, core.ExitSuccess)
+	}
+}
+
 func TestShowVersionOutput(t *testing.T) {
 	buf := new(bytes.Buffer)
 	showVersion(buf)
@@ -280,6 +289,37 @@ func TestReadInputFileEmpty(t *testing.T) {
 	}
 }
 
+func TestCleanupPostStartupTemplate(t *testing.T) {
+	opts := &config.Options{
+		Out:             "file.bin",
+		ForceSequential: true,
+		InputFile:       "input.txt",
+		IndexOut:        []string{"1=piece.bin"},
+		SelectFile:      "1",
+		Pause:           true,
+		Checksum:        "sha-1=deadbeef",
+		GID:             "00000000000000ab",
+	}
+	for _, name := range []string{"out", "force-sequential", "input-file", "index-out", "select-file", "pause", "checksum", "gid"} {
+		opts.MarkExplicit(name)
+	}
+
+	cleanupPostStartupTemplate(opts)
+
+	if opts.Out != "" || opts.InputFile != "" || opts.SelectFile != "" || opts.Checksum != "" || opts.GID != "" {
+		t.Fatalf("cleanup left string fields behind: %+v", opts)
+	}
+	if opts.ForceSequential || opts.Pause {
+		t.Fatalf("cleanup left boolean fields behind: %+v", opts)
+	}
+	if len(opts.IndexOut) != 0 {
+		t.Fatalf("cleanup left index-out entries behind: %+v", opts.IndexOut)
+	}
+	if got := opts.ExplicitNames(); len(got) != 0 {
+		t.Fatalf("cleanup left explicit markers behind: %v", got)
+	}
+}
+
 func TestGuessTorrentFile(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.torrent"
@@ -368,13 +408,30 @@ func TestShowFilesTorrent(t *testing.T) {
 }
 
 func TestShowFilesMetalink(t *testing.T) {
-	old := os.Stderr
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.meta4")
+	data := `<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="a.bin"><size>500</size><url>http://example.invalid/a.bin</url></file>
+  <file name="sub/b.bin"><size>700</size><url>http://example.invalid/sub/b.bin</url></file>
+</metalink>`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write metalink fixture: %v", err)
+	}
+
+	old := os.Stdout
 	r, w, _ := os.Pipe()
-	os.Stderr = w
-	showMetalinkFile("test.meta4")
+	os.Stdout = w
+	showMetalinkFile(path, nil)
 	w.Close()
-	os.Stderr = old
-	io.ReadAll(r)
+	os.Stdout = old
+	output, _ := io.ReadAll(r)
+	text := string(output)
+	for _, want := range []string{"Files:", "  1|a.bin", "500B (500)", "  2|sub/b.bin", "700B (700)"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("showMetalinkFile output missing %q:\n%s", want, text)
+		}
+	}
 }
 
 func TestFindDefaultConfigPath(t *testing.T) {
@@ -386,7 +443,7 @@ func TestShowPositionalFiles(t *testing.T) {
 	old := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
-	showPositionalFiles([]string{"/nonexistent"}, nil)
+	showPositionalFiles([]string{"/nonexistent"}, nil, nil)
 	w.Close()
 	os.Stderr = old
 	io.ReadAll(r)
@@ -519,6 +576,29 @@ func TestParseArgsIntegration(t *testing.T) {
 	}
 }
 
+func TestDaemonChildArgsStripsDaemonFlags(t *testing.T) {
+	argv := []string{
+		"aria2go",
+		"--daemon",
+		"--dir=/downloads",
+		"-D",
+		"--daemon=true",
+		"-D=true",
+		"http://example.com/file",
+	}
+
+	got := daemonChildArgs(argv)
+	want := []string{"aria2go", "--dir=/downloads", "http://example.com/file"}
+	if len(got) != len(want) {
+		t.Fatalf("daemonChildArgs(%v) = %v, want %v", argv, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("daemonChildArgs(%v) = %v, want %v", argv, got, want)
+		}
+	}
+}
+
 func TestConfigMergeOrder(t *testing.T) {
 	defaults := config.Default()
 	cli := &config.Options{Dir: "/cli-dir", Split: 16}
@@ -607,7 +687,7 @@ func TestShowFileContents(t *testing.T) {
 	old := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
-	showFileContents("/nonexistent.torrent", "", nil)
+	showFileContents("/nonexistent.torrent", "", nil, nil)
 	w.Close()
 	os.Stderr = old
 	output, _ := io.ReadAll(r)
@@ -618,23 +698,23 @@ func TestShowFileContents(t *testing.T) {
 	old = os.Stderr
 	r2, w2, _ := os.Pipe()
 	os.Stderr = w2
-	showFileContents("", "/nonexistent.meta4", nil)
+	showFileContents("", "/nonexistent.meta4", nil, nil)
 	w2.Close()
 	os.Stderr = old
 	output2, _ := io.ReadAll(r2)
-	if !strings.Contains(string(output2), "not yet implemented") {
-		t.Error("showFileContents for metalink should output not-yet-implemented message")
+	if !strings.Contains(string(output2), "cannot read metalink file") {
+		t.Error("showFileContents for metalink should report read error")
 	}
 
 	old = os.Stderr
 	r3, w3, _ := os.Pipe()
 	os.Stderr = w3
-	showFileContents("/nonexistent.torrent", "/nonexistent.meta4", nil)
+	showFileContents("/nonexistent.torrent", "/nonexistent.meta4", nil, nil)
 	w3.Close()
 	os.Stderr = old
 	output3, _ := io.ReadAll(r3)
-	if !strings.Contains(string(output3), "not yet implemented") {
-		t.Error("showFileContents for both should output messages")
+	if !strings.Contains(string(output3), "not yet implemented") || !strings.Contains(string(output3), "cannot read metalink file") {
+		t.Error("showFileContents for both should output both error messages")
 	}
 }
 
@@ -852,7 +932,7 @@ func TestAddTorrentFileUsesPositionalsAsWebSeeds(t *testing.T) {
 		t.Fatalf("write torrent: %v", err)
 	}
 	adder := &captureAdder{}
-	if err := addTorrentFile(adder, &config.Options{}, torrentPath, "http://seed1", "http://seed2"); err != nil {
+	if err := addTorrentFile(adder, &config.Options{}, &config.Options{}, torrentPath, "http://seed1", "http://seed2"); err != nil {
 		t.Fatalf("addTorrentFile: %v", err)
 	}
 	if len(adder.specs) != 1 {
@@ -866,6 +946,9 @@ func TestAddTorrentFileUsesPositionalsAsWebSeeds(t *testing.T) {
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("web seed URIs = %v, want %v", got, want)
 	}
+	if adder.specs[0].MetadataURI != torrentPath {
+		t.Fatalf("MetadataURI = %q, want %q", adder.specs[0].MetadataURI, torrentPath)
+	}
 }
 
 func TestAddDownloadSourceExpandsParameterizedForceSequential(t *testing.T) {
@@ -873,7 +956,7 @@ func TestAddDownloadSourceExpandsParameterizedForceSequential(t *testing.T) {
 	added, err := addDownloadSource(adder, &config.Options{
 		ParameterizedURI: true,
 		ForceSequential:  true,
-	}, "http://example.com/asset-[1-2].bin")
+	}, &config.Options{}, "http://example.com/asset-[1-2].bin")
 	if err != nil {
 		t.Fatalf("addDownloadSource() error = %v", err)
 	}

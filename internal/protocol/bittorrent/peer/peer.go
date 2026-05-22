@@ -192,9 +192,26 @@ func (c *Conn) Run(ctx context.Context) error {
 }
 
 func Dial(ctx context.Context, dialer *netx.Dialer, addr string, cfg Config) (*Conn, error) {
-	c, err := dialer.DialContext(ctx, "tcp", addr)
+	return DialTransport(ctx, func(ctx context.Context) (net.Conn, error) {
+		c, err := dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, fmt.Errorf("peer: dial %s: %w", addr, err)
+		}
+		return c, nil
+	}, cfg)
+}
+
+func plainFallbackAllowed(mode mse.Mode) bool {
+	return mode == mse.Allow || mode == mse.Prefer
+}
+
+// DialTransport establishes a peer connection over the provided transport
+// dialer. When encryption is optional, it retries a fresh plain handshake
+// after an MSE failure, matching aria2's legacy fallback.
+func DialTransport(ctx context.Context, dial func(context.Context) (net.Conn, error), cfg Config) (*Conn, error) {
+	c, err := dial(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("peer: dial %s: %w", addr, err)
+		return nil, err
 	}
 
 	var transport net.Conn = c
@@ -205,9 +222,10 @@ func Dial(ctx context.Context, dialer *netx.Dialer, addr string, cfg Config) (*C
 			if !plainFallbackAllowed(cfg.Encrypt) {
 				return nil, err
 			}
-			c, err = dialer.DialContext(ctx, "tcp", addr)
+
+			c, err = dial(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("peer: dial plain fallback %s: %w", addr, err)
+				return nil, err
 			}
 			transport = c
 		} else {
@@ -216,10 +234,6 @@ func Dial(ctx context.Context, dialer *netx.Dialer, addr string, cfg Config) (*C
 	}
 
 	return dialHandshake(ctx, transport, cfg)
-}
-
-func plainFallbackAllowed(mode mse.Mode) bool {
-	return mode == mse.Allow || mode == mse.Prefer
 }
 
 func dialHandshake(ctx context.Context, transport net.Conn, cfg Config) (*Conn, error) {
@@ -255,6 +269,9 @@ func dialHandshake(ctx context.Context, transport net.Conn, cfg Config) (*Conn, 
 }
 
 func Accept(ctx context.Context, c net.Conn, cfg Config) (*Conn, error) {
+	stopClose := closeConnOnContextDone(ctx, c)
+	defer stopClose()
+
 	var transport net.Conn = c
 	if cfg.Encrypt != mse.Off {
 		if err := setConnDeadline(ctx, c, cfg.timeout()); err != nil {
@@ -285,35 +302,7 @@ func Accept(ctx context.Context, c net.Conn, cfg Config) (*Conn, error) {
 	}
 
 handshake:
-	conn, err := newConn(transport, cfg)
-	if err != nil {
-		transport.Close()
-		return nil, err
-	}
-
-	if err := conn.setDeadline(ctx, cfg.timeout()); err != nil {
-		conn.conn.Close()
-		return nil, err
-	}
-	peerHS, err := conn.readHandshake()
-	if err != nil {
-		conn.conn.Close()
-		return nil, fmt.Errorf("peer: read handshake: %w", err)
-	}
-	conn.peerHandshake = peerHS
-	if peerHS.InfoHash != cfg.InfoHash {
-		conn.conn.Close()
-		return nil, fmt.Errorf("%w: handshake info hash mismatch", ErrProtocolViolation)
-	}
-	conn.peerHasFastExt = hasFastExtension(peerHS.Reserved)
-
-	if _, err := conn.conn.Write(conn.localHandshake[:]); err != nil {
-		conn.conn.Close()
-		return nil, fmt.Errorf("peer: write handshake: %w", err)
-	}
-	conn.clearDeadline()
-
-	return conn, nil
+	return acceptHandshake(ctx, transport, cfg)
 }
 
 type prefixConn struct {
@@ -501,6 +490,69 @@ func (c *Conn) setError(err error) {
 // connection shuts down or Run returns.
 func (c *Conn) Messages() <-chan Message {
 	return c.recvCh
+}
+
+func (c *Conn) PeerHandshake() Handshake {
+	return c.peerHandshake
+}
+
+func (c *Conn) PeerSupportsExtensionMessaging() bool {
+	return hasExtensionMessaging(c.peerHandshake.Reserved)
+}
+
+func (c *Conn) PeerSupportsDHT() bool {
+	return hasDHT(c.peerHandshake.Reserved)
+}
+
+func (c *Conn) ExtensionMessageID(key int) uint8 {
+	return c.getExtensionMessageID(key)
+}
+
+func acceptHandshake(ctx context.Context, transport net.Conn, cfg Config) (*Conn, error) {
+	conn, err := newConn(transport, cfg)
+	if err != nil {
+		transport.Close()
+		return nil, err
+	}
+
+	if err := conn.setDeadline(ctx, cfg.timeout()); err != nil {
+		conn.conn.Close()
+		return nil, err
+	}
+	peerHS, err := conn.readHandshake()
+	if err != nil {
+		conn.conn.Close()
+		return nil, fmt.Errorf("peer: read handshake: %w", err)
+	}
+	conn.peerHandshake = peerHS
+	if peerHS.InfoHash != cfg.InfoHash {
+		conn.conn.Close()
+		return nil, fmt.Errorf("%w: handshake info hash mismatch", ErrProtocolViolation)
+	}
+	conn.peerHasFastExt = hasFastExtension(peerHS.Reserved)
+
+	if _, err := conn.conn.Write(conn.localHandshake[:]); err != nil {
+		conn.conn.Close()
+		return nil, fmt.Errorf("peer: write handshake: %w", err)
+	}
+	conn.clearDeadline()
+
+	return conn, nil
+}
+
+func (c *Conn) SetExtensionMessageID(key int, id uint8) {
+	c.addExtension(key, id)
+}
+
+func (c *Conn) Extended(id uint8, payload []byte) error {
+	data := make([]byte, 1+len(payload))
+	data[0] = id
+	copy(data[1:], payload)
+	return c.send(NewMessage(MsgExtended, data).Encode())
+}
+
+func (c *Conn) SendEncoded(data []byte) error {
+	return c.send(cloneBytes(data))
 }
 
 func (c *Conn) writer(ctx context.Context) {
@@ -861,6 +913,18 @@ func setConnDeadline(ctx context.Context, conn net.Conn, d time.Duration) error 
 		return ErrHandshakeTimeout
 	}
 	return conn.SetDeadline(time.Now().Add(d))
+}
+
+func closeConnOnContextDone(ctx context.Context, conn net.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }
 
 func (c *Conn) clearDeadline() {

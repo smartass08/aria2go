@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"testing"
+	"time"
 )
 
 func TestEncodeFPacket(t *testing.T) {
@@ -176,6 +177,23 @@ func TestParseATTRS_Dir(t *testing.T) {
 	}
 }
 
+func TestParseATTRS_ModTime(t *testing.T) {
+	var buf []byte
+	buf = binary.BigEndian.AppendUint32(buf, attrSize|attrAcmodTime)
+	buf = binary.BigEndian.AppendUint64(buf, 12345)
+	buf = binary.BigEndian.AppendUint32(buf, 100)
+	buf = binary.BigEndian.AppendUint32(buf, 1716400000)
+
+	fi, err := parseATTRS(buf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := time.Unix(1716400000, 0).UTC()
+	if !fi.ModTime.Equal(want) {
+		t.Fatalf("ModTime = %s, want %s", fi.ModTime, want)
+	}
+}
+
 func TestParseATTRS_Short(t *testing.T) {
 	_, err := parseATTRS([]byte{0, 0, 0})
 	if err == nil {
@@ -299,6 +317,15 @@ func TestBuildSTAT(t *testing.T) {
 	path := string(payload[4 : 4+int(pathLen)])
 	if path != "/path/to/file" {
 		t.Errorf("path = %q, want %q", path, "/path/to/file")
+	}
+}
+
+func TestDecodePath(t *testing.T) {
+	if got := decodePath("/dir/file%20name.txt"); got != "/dir/file name.txt" {
+		t.Fatalf("decodePath() = %q", got)
+	}
+	if got := decodePath("/dir/%zz/file"); got != "/dir/%zz/file" {
+		t.Fatalf("decodePath() fallback = %q", got)
 	}
 }
 

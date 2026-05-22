@@ -226,6 +226,8 @@ func TestReadCumulativeOptions(t *testing.T) {
 		" gid=0000000000000001\n" +
 		" bt-tracker=http://t1.example/announce\n" +
 		" bt-tracker=http://t2.example/announce\n" +
+		" dht-entry-point=router.bittorrent.com:6881\n" +
+		" dht-entry-point=dht.transmissionbt.com:6881\n" +
 		" header=X-Custom: val1\n" +
 		" header=X-Custom: val2\n"
 
@@ -244,6 +246,9 @@ func TestReadCumulativeOptions(t *testing.T) {
 	}
 	if e.Options["header"] != "X-Custom: val1\nX-Custom: val2" {
 		t.Errorf("header = %q", e.Options["header"])
+	}
+	if e.Options["dht-entry-point"] != "router.bittorrent.com:6881\ndht.transmissionbt.com:6881" {
+		t.Errorf("dht-entry-point = %q", e.Options["dht-entry-point"])
 	}
 }
 

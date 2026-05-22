@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -41,7 +42,7 @@ func protocolFixtureStrategies() []protocolFixtureStrategy {
 			Offline:      true,
 			Differential: true,
 			Ready:        true,
-			Notes:        "local passive FTP server with EPSV/PASV, SIZE, REST, and RETR",
+			Notes:        "local FTP server with active/passive data connections, SIZE, REST, MDTM, and RETR",
 		},
 		{
 			Name:         "SFTP",
@@ -171,13 +172,52 @@ func startProtocolHTTPFixture(t *testing.T, files map[string][]byte) *protocolHT
 		}
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 			return
 		}
+		if start, end, ok := protocolRangeBounds(r.Header.Get("Range"), len(data)); ok {
+			w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(data[start : end+1])
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		_, _ = w.Write(data)
 	}))
 	return f
+}
+
+func protocolRangeBounds(raw string, size int) (start int, end int, ok bool) {
+	if !strings.HasPrefix(raw, "bytes=") || size <= 0 {
+		return 0, 0, false
+	}
+	spec := strings.TrimPrefix(raw, "bytes=")
+	startText, endText, hasDash := strings.Cut(spec, "-")
+	if !hasDash {
+		return 0, 0, false
+	}
+	startText = strings.TrimSpace(startText)
+	endText = strings.TrimSpace(endText)
+	if startText == "" {
+		return 0, 0, false
+	}
+	start, err := strconv.Atoi(startText)
+	if err != nil || start < 0 || start >= size {
+		return 0, 0, false
+	}
+	if endText == "" {
+		return start, size - 1, true
+	}
+	end, err = strconv.Atoi(endText)
+	if err != nil || end < start {
+		return 0, 0, false
+	}
+	if end >= size {
+		end = size - 1
+	}
+	return start, end, true
 }
 
 func (f *protocolHTTPFixture) URLPath(name string) string {
@@ -226,11 +266,35 @@ type protocolFTPFixture struct {
 
 	mu       sync.Mutex
 	files    map[string][]byte
-	commands []string
+	commands []protocolFTPCommand
+
+	supportSize bool
+	modTime     time.Time
+}
+
+type protocolFTPFixtureOptions struct {
+	SupportSize bool
+	ModTime     time.Time
+}
+
+type protocolFTPCommand struct {
+	Name string
+	Arg  string
 }
 
 func startProtocolFTPFixture(t *testing.T, files map[string][]byte) *protocolFTPFixture {
 	t.Helper()
+	return startProtocolFTPFixtureWithOptions(t, files, protocolFTPFixtureOptions{
+		SupportSize: true,
+		ModTime:     protocolFTPMTime(),
+	})
+}
+
+func startProtocolFTPFixtureWithOptions(t *testing.T, files map[string][]byte, opts protocolFTPFixtureOptions) *protocolFTPFixture {
+	t.Helper()
+	if opts.ModTime.IsZero() {
+		opts.ModTime = protocolFTPMTime()
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -238,9 +302,11 @@ func startProtocolFTPFixture(t *testing.T, files map[string][]byte) *protocolFTP
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &protocolFTPFixture{
-		ln:     ln,
-		cancel: cancel,
-		files:  make(map[string][]byte, len(files)),
+		ln:          ln,
+		cancel:      cancel,
+		files:       make(map[string][]byte, len(files)),
+		supportSize: opts.SupportSize,
+		modTime:     opts.ModTime,
 	}
 	for name, data := range files {
 		key := "/" + strings.TrimPrefix(path.Clean(name), "/")
@@ -253,7 +319,11 @@ func startProtocolFTPFixture(t *testing.T, files map[string][]byte) *protocolFTP
 }
 
 func (f *protocolFTPFixture) URL(name string) string {
-	return "ftp://" + f.ln.Addr().String() + "/" + strings.TrimPrefix(path.Clean(name), "/")
+	return (&url.URL{
+		Scheme: "ftp",
+		Host:   f.ln.Addr().String(),
+		Path:   "/" + strings.TrimPrefix(path.Clean(name), "/"),
+	}).String()
 }
 
 func (f *protocolFTPFixture) Close() {
@@ -264,12 +334,22 @@ func (f *protocolFTPFixture) Close() {
 func (f *protocolFTPFixture) snapshotCommands() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.commands...)
+	out := make([]string, 0, len(f.commands))
+	for _, cmd := range f.commands {
+		out = append(out, cmd.Name)
+	}
+	return out
 }
 
-func (f *protocolFTPFixture) record(cmd string) {
+func (f *protocolFTPFixture) snapshotCommandDetails() []protocolFTPCommand {
 	f.mu.Lock()
-	f.commands = append(f.commands, cmd)
+	defer f.mu.Unlock()
+	return append([]protocolFTPCommand(nil), f.commands...)
+}
+
+func (f *protocolFTPFixture) record(cmd, arg string) {
+	f.mu.Lock()
+	f.commands = append(f.commands, protocolFTPCommand{Name: cmd, Arg: arg})
 	f.mu.Unlock()
 }
 
@@ -289,8 +369,9 @@ func (f *protocolFTPFixture) serve(ctx context.Context) {
 }
 
 type protocolFTPSession struct {
-	dataLn net.Listener
-	rest   int64
+	dataLn     net.Listener
+	activeAddr string
+	rest       int64
 }
 
 func (f *protocolFTPFixture) handleConn(ctx context.Context, conn net.Conn) {
@@ -322,7 +403,7 @@ func (f *protocolFTPFixture) handleConn(ctx context.Context, conn net.Conn) {
 			continue
 		}
 		cmd, arg := splitFTPCommand(line)
-		f.record(cmd)
+		f.record(cmd, arg)
 
 		switch cmd {
 		case "USER":
@@ -340,7 +421,9 @@ func (f *protocolFTPFixture) handleConn(ctx context.Context, conn net.Conn) {
 		case "FEAT":
 			writeFTPLine(writer, "211-Features")
 			writeFTPLine(writer, " EPSV")
-			writeFTPLine(writer, " SIZE")
+			if f.supportSize {
+				writeFTPLine(writer, " SIZE")
+			}
 			writeFTPLine(writer, " MDTM")
 			writeFTPLine(writer, " REST STREAM")
 			writeFTPLine(writer, "211 End")
@@ -358,7 +441,27 @@ func (f *protocolFTPFixture) handleConn(ctx context.Context, conn net.Conn) {
 			if ok {
 				writeFTPLine(writer, fmt.Sprintf("227 Entering Passive Mode (127,0,0,1,%d,%d)", port/256, port%256))
 			}
+		case "PORT":
+			addr, err := protocolParseFTPPort(arg)
+			if err != nil {
+				writeFTPLine(writer, "501 bad PORT argument")
+				continue
+			}
+			sess.activeAddr = addr
+			writeFTPLine(writer, "200 PORT command ok")
+		case "EPRT":
+			addr, err := protocolParseFTPEprt(arg)
+			if err != nil {
+				writeFTPLine(writer, "501 bad EPRT argument")
+				continue
+			}
+			sess.activeAddr = addr
+			writeFTPLine(writer, "200 EPRT command ok")
 		case "SIZE":
+			if !f.supportSize {
+				writeFTPLine(writer, "500 SIZE not understood")
+				continue
+			}
 			data, ok := f.lookup(arg)
 			if !ok {
 				writeFTPLine(writer, "550 not found")
@@ -370,7 +473,7 @@ func (f *protocolFTPFixture) handleConn(ctx context.Context, conn net.Conn) {
 				writeFTPLine(writer, "550 not found")
 				continue
 			}
-			writeFTPLine(writer, "213 20260521000000")
+			writeFTPLine(writer, "213 "+f.modTime.UTC().Format("20060102150405"))
 		case "REST":
 			offset, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64)
 			if err != nil || offset < 0 {
@@ -408,6 +511,7 @@ func (f *protocolFTPFixture) startFTPDataListener(w *bufio.Writer, sess *protoco
 		_ = sess.dataLn.Close()
 		sess.dataLn = nil
 	}
+	sess.activeAddr = ""
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		writeFTPLine(w, "425 cannot open data connection")
@@ -418,8 +522,8 @@ func (f *protocolFTPFixture) startFTPDataListener(w *bufio.Writer, sess *protoco
 }
 
 func (f *protocolFTPFixture) handleRETR(w *bufio.Writer, sess *protocolFTPSession, name string) {
-	if sess.dataLn == nil {
-		writeFTPLine(w, "425 use passive mode first")
+	if sess.dataLn == nil && sess.activeAddr == "" {
+		writeFTPLine(w, "425 use active or passive mode first")
 		return
 	}
 	data, ok := f.lookup(name)
@@ -434,17 +538,56 @@ func (f *protocolFTPFixture) handleRETR(w *bufio.Writer, sess *protocolFTPSessio
 	sess.rest = 0
 
 	writeFTPLine(w, "150 opening data connection")
-	_ = sess.dataLn.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
-	dataConn, err := sess.dataLn.Accept()
-	if err != nil {
-		writeFTPLine(w, "425 data connection failed")
-		return
+	var (
+		dataConn net.Conn
+		err      error
+	)
+	if sess.dataLn != nil {
+		_ = sess.dataLn.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
+		dataConn, err = sess.dataLn.Accept()
+		if err != nil {
+			writeFTPLine(w, "425 data connection failed")
+			return
+		}
+	} else {
+		dataConn, err = net.DialTimeout("tcp", sess.activeAddr, 10*time.Second)
+		if err != nil {
+			writeFTPLine(w, "425 data connection failed")
+			return
+		}
 	}
 	_, _ = dataConn.Write(data[offset:])
 	_ = dataConn.Close()
-	_ = sess.dataLn.Close()
-	sess.dataLn = nil
+	if sess.dataLn != nil {
+		_ = sess.dataLn.Close()
+		sess.dataLn = nil
+	}
+	sess.activeAddr = ""
 	writeFTPLine(w, "226 transfer complete")
+}
+
+func protocolParseFTPPort(arg string) (string, error) {
+	parts := strings.Split(arg, ",")
+	if len(parts) != 6 {
+		return "", fmt.Errorf("bad PORT argument %q", arg)
+	}
+	p1, err := strconv.Atoi(parts[4])
+	if err != nil {
+		return "", err
+	}
+	p2, err := strconv.Atoi(parts[5])
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s.%s.%s.%s:%d", parts[0], parts[1], parts[2], parts[3], p1*256+p2), nil
+}
+
+func protocolParseFTPEprt(arg string) (string, error) {
+	parts := strings.Split(arg, "|")
+	if len(parts) != 5 {
+		return "", fmt.Errorf("bad EPRT argument %q", arg)
+	}
+	return net.JoinHostPort(parts[2], parts[3]), nil
 }
 
 func (f *protocolFTPFixture) lookup(name string) ([]byte, bool) {
@@ -453,6 +596,227 @@ func (f *protocolFTPFixture) lookup(name string) ([]byte, bool) {
 	defer f.mu.Unlock()
 	data, ok := f.files[key]
 	return data, ok
+}
+
+func protocolFTPMTime() time.Time {
+	return time.Date(2026, time.May, 21, 0, 0, 0, 0, time.UTC)
+}
+
+type protocolFTPProxyRequest struct {
+	Method string
+	Target string
+	Host   string
+	Range  string
+}
+
+type protocolFTPProxyFixture struct {
+	ln     net.Listener
+	cancel context.CancelFunc
+
+	mu      sync.Mutex
+	files   map[string][]byte
+	modTime time.Time
+	records []protocolFTPProxyRequest
+}
+
+func startProtocolFTPProxyFixture(t *testing.T, files map[string][]byte) *protocolFTPProxyFixture {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ftp proxy listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &protocolFTPProxyFixture{
+		ln:      ln,
+		cancel:  cancel,
+		files:   make(map[string][]byte, len(files)),
+		modTime: protocolFTPMTime(),
+	}
+	for name, data := range files {
+		key := "/" + strings.TrimPrefix(path.Clean(name), "/")
+		f.files[key] = append([]byte(nil), data...)
+	}
+	go f.serve(ctx)
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *protocolFTPProxyFixture) URL() string {
+	return "http://" + f.ln.Addr().String()
+}
+
+func (f *protocolFTPProxyFixture) Close() {
+	f.cancel()
+	_ = f.ln.Close()
+}
+
+func (f *protocolFTPProxyFixture) snapshotRequests() []protocolFTPProxyRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]protocolFTPProxyRequest(nil), f.records...)
+}
+
+func (f *protocolFTPProxyFixture) serve(ctx context.Context) {
+	for {
+		conn, err := f.ln.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				continue
+			}
+		}
+		go f.handleConn(ctx, conn)
+	}
+}
+
+func (f *protocolFTPProxyFixture) handleConn(parent context.Context, client net.Conn) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	defer client.Close()
+
+	_ = client.SetDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(client)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		return
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return
+	}
+	method, target, proto := fields[0], fields[1], fields[2]
+
+	host := ""
+	rangeHeader := ""
+	for {
+		h, err := br.ReadString('\n')
+		if err != nil {
+			return
+		}
+		if h == "\r\n" || h == "\n" {
+			break
+		}
+		if name, value, ok := strings.Cut(h, ":"); ok {
+			switch {
+			case strings.EqualFold(name, "Host"):
+				host = strings.TrimSpace(value)
+			case strings.EqualFold(name, "Range"):
+				rangeHeader = strings.TrimSpace(value)
+			}
+		}
+	}
+
+	f.mu.Lock()
+	f.records = append(f.records, protocolFTPProxyRequest{
+		Method: method,
+		Target: target,
+		Host:   host,
+		Range:  rangeHeader,
+	})
+	f.mu.Unlock()
+
+	if method == http.MethodConnect {
+		f.handleConnect(ctx, client, br, target)
+		return
+	}
+	f.handleFTPProxyRequest(client, method, target, proto, rangeHeader)
+}
+
+func (f *protocolFTPProxyFixture) handleFTPProxyRequest(client net.Conn, method, target, proto, rangeHeader string) {
+	targetURL, err := url.Parse(target)
+	if err != nil || !strings.EqualFold(targetURL.Scheme, "ftp") {
+		_, _ = io.WriteString(client, proto+" 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
+	data, ok := f.lookupProxyFile(targetURL.Path)
+	if !ok {
+		_, _ = io.WriteString(client, proto+" 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
+
+	status := http.StatusOK
+	body := data
+	contentRange := ""
+
+	// Range handling is intentionally simple: enough for resume and segment probes.
+	if start, ok := parseProtocolHTTPRange(rangeHeader); ok {
+		if start > int64(len(data)) {
+			_, _ = io.WriteString(client, proto+" 416 Requested Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n")
+			return
+		}
+		status = http.StatusPartialContent
+		body = data[start:]
+		contentRange = fmt.Sprintf("bytes %d-%d/%d", start, len(data)-1, len(data))
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %d %s\r\n", proto, status, http.StatusText(status))
+	fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
+	b.WriteString("Content-Type: application/octet-stream\r\n")
+	b.WriteString("Accept-Ranges: bytes\r\n")
+	b.WriteString("Last-Modified: " + f.modTime.Format(http.TimeFormat) + "\r\n")
+	if contentRange != "" {
+		b.WriteString("Content-Range: " + contentRange + "\r\n")
+	}
+	b.WriteString("\r\n")
+	_, _ = io.WriteString(client, b.String())
+	if method != http.MethodHead {
+		_, _ = client.Write(body)
+	}
+}
+
+func (f *protocolFTPProxyFixture) handleConnect(parent context.Context, client net.Conn, br *bufio.Reader, target string) {
+	upstream, err := net.DialTimeout("tcp", target, 5*time.Second)
+	if err != nil {
+		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
+	defer upstream.Close()
+
+	_, _ = io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	done := make(chan struct{}, 2)
+
+	go func() {
+		<-ctx.Done()
+		_ = client.Close()
+		_ = upstream.Close()
+	}()
+	go func() {
+		_, _ = io.Copy(upstream, br)
+		_ = upstream.Close()
+		cancel()
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, upstream)
+		cancel()
+		done <- struct{}{}
+	}()
+	<-done
+}
+
+func (f *protocolFTPProxyFixture) lookupProxyFile(name string) ([]byte, bool) {
+	key := "/" + strings.TrimPrefix(path.Clean(name), "/")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[key]
+	return data, ok
+}
+
+func parseProtocolHTTPRange(value string) (int64, bool) {
+	if !strings.HasPrefix(value, "bytes=") || !strings.HasSuffix(value, "-") {
+		return 0, false
+	}
+	start, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(value, "bytes="), "-"), 10, 64)
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	return start, true
 }
 
 type protocolBTFixture struct {

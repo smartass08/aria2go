@@ -4,17 +4,24 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -67,6 +74,94 @@ func TestRPCDeep_JSONRPCBatchMixedStatusMatrix(t *testing.T) {
 		if refStat[key] != implStat[key] {
 			t.Errorf("batch getGlobalStat %s mismatch: ref=%q impl=%q", key, refStat[key], implStat[key])
 		}
+	}
+}
+
+func TestRPCDeep_JSONRPCBatchInvalidObjectMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	refPort, implPort := startRPCPair(t, []string{"--no-conf"}, []string{"--no-conf"})
+
+	requests := []any{
+		map[string]any{"jsonrpc": "2.0", "id": "methods", "method": "system.listMethods", "params": []any{}},
+		map[string]any{"jsonrpc": "2.0", "id": "broken"},
+		map[string]any{"jsonrpc": "2.0", "id": "stat", "method": "aria2.getGlobalStat", "params": []any{}},
+	}
+
+	refStatus, refBatch := rpcPostBatch(t, refPort, requests)
+	implStatus, implBatch := rpcPostBatch(t, implPort, requests)
+	if refStatus != http.StatusOK {
+		t.Fatalf("ref invalid-object batch HTTP status got %d want 200", refStatus)
+	}
+	if implStatus != refStatus {
+		t.Fatalf("impl invalid-object batch HTTP status got %d want ref status %d", implStatus, refStatus)
+	}
+
+	compareBatchEnvelope(t, refBatch, implBatch)
+	requireBatchErrorCode(t, "ref invalid object", refBatch, "broken", -32600)
+	requireBatchErrorCode(t, "impl invalid object", implBatch, "broken", -32600)
+	compareStringSet(t, "invalid-object batch listMethods",
+		batchResultStrings(t, refBatch, "methods"),
+		batchResultStrings(t, implBatch, "methods"))
+
+	refStat := batchResultStringMap(t, refBatch, "stat")
+	implStat := batchResultStringMap(t, implBatch, "stat")
+	for _, key := range []string{"downloadSpeed", "uploadSpeed", "numActive", "numWaiting", "numStopped", "numStoppedTotal"} {
+		if refStat[key] != implStat[key] {
+			t.Errorf("invalid-object batch getGlobalStat %s mismatch: ref=%q impl=%q", key, refStat[key], implStat[key])
+		}
+	}
+}
+
+func TestRPCDeep_JSONRPCSingleInvalidShapeMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	refPort, implPort := startRPCPair(t, []string{"--no-conf"}, []string{"--no-conf"})
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing method preserves id",
+			body: `{"jsonrpc":"2.0","id":"bad","params":[]}`,
+		},
+		{
+			name: "invalid params preserves id",
+			body: `{"jsonrpc":"2.0","id":"badp","method":"aria2.getVersion","params":{}}`,
+		},
+		{
+			name: "top level scalar is invalid request",
+			body: `"str"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			refStatus, refRaw := rpcPostRaw(t, httpClient, "http", refPort, []byte(tc.body))
+			implStatus, implRaw := rpcPostRaw(t, httpClient, "http", implPort, []byte(tc.body))
+			if implStatus != refStatus {
+				t.Fatalf("HTTP status mismatch: ref=%d impl=%d", refStatus, implStatus)
+			}
+
+			ref := decodeDeepRPCResponse(t, "ref "+tc.name, refRaw)
+			impl := decodeDeepRPCResponse(t, "impl "+tc.name, implRaw)
+			if string(ref.ID) != string(impl.ID) {
+				t.Fatalf("id mismatch: ref=%s impl=%s", ref.ID, impl.ID)
+			}
+			if ref.JSONRPC != "2.0" || impl.JSONRPC != "2.0" {
+				t.Fatalf("jsonrpc mismatch: ref=%q impl=%q", ref.JSONRPC, impl.JSONRPC)
+			}
+			if ref.Error == nil || impl.Error == nil {
+				t.Fatalf("expected errors: ref=%#v impl=%#v", ref, impl)
+			}
+			if ref.Error.Code != impl.Error.Code {
+				t.Fatalf("error code mismatch: ref=%d impl=%d", ref.Error.Code, impl.Error.Code)
+			}
+			if ref.Error.Message != impl.Error.Message {
+				t.Fatalf("error message mismatch: ref=%q impl=%q", ref.Error.Message, impl.Error.Message)
+			}
+		})
 	}
 }
 
@@ -205,6 +300,75 @@ func TestRPCDeep_HTTPGETJSONPMatrix(t *testing.T) {
 	}
 }
 
+func TestRPCDeep_HTTPGETJSONPEdgeMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	refPort, implPort := startRPCPair(t, []string{"--no-conf"}, []string{"--no-conf"})
+
+	cases := []struct {
+		name     string
+		callback string
+		query    string
+		assert   func(*testing.T, json.RawMessage, json.RawMessage)
+	}{
+		{
+			name:     "percent encoded id is preserved raw",
+			callback: "cb_raw",
+			query:    "method=system.listMethods&id=a%2Fb&jsoncallback=cb_raw",
+			assert: func(t *testing.T, refRaw, implRaw json.RawMessage) {
+				t.Helper()
+				ref := decodeDeepRPCResponse(t, "ref raw id", refRaw)
+				impl := decodeDeepRPCResponse(t, "impl raw id", implRaw)
+				if string(ref.ID) != string(impl.ID) {
+					t.Fatalf("id mismatch: ref=%s impl=%s", ref.ID, impl.ID)
+				}
+				if string(ref.ID) != `"a%2Fb"` {
+					t.Fatalf("ref id got %s want %q", ref.ID, `"a%2Fb"`)
+				}
+				if ref.Error != nil || impl.Error != nil {
+					t.Fatalf("unexpected errors: ref=%#v impl=%#v", ref.Error, impl.Error)
+				}
+			},
+		},
+		{
+			name:     "invalid base64 params become invalid request",
+			callback: "cb_bad",
+			query:    "method=system.listMethods&id=x&params=not_base64&jsoncallback=cb_bad",
+			assert: func(t *testing.T, refRaw, implRaw json.RawMessage) {
+				t.Helper()
+				ref := decodeDeepRPCResponse(t, "ref bad base64", refRaw)
+				impl := decodeDeepRPCResponse(t, "impl bad base64", implRaw)
+				if string(ref.ID) != string(impl.ID) {
+					t.Fatalf("id mismatch: ref=%s impl=%s", ref.ID, impl.ID)
+				}
+				if string(ref.ID) != "null" {
+					t.Fatalf("ref id got %s want null", ref.ID)
+				}
+				if ref.Error == nil || impl.Error == nil {
+					t.Fatalf("expected errors: ref=%#v impl=%#v", ref, impl)
+				}
+				if ref.Error.Code != impl.Error.Code {
+					t.Fatalf("error code mismatch: ref=%d impl=%d", ref.Error.Code, impl.Error.Code)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			refStatus, refContentType, refRaw := rpcJSONPGETRaw(t, refPort, tc.query, tc.callback)
+			implStatus, implContentType, implRaw := rpcJSONPGETRaw(t, implPort, tc.query, tc.callback)
+			if implStatus != refStatus {
+				t.Fatalf("HTTP status mismatch: ref=%d impl=%d", refStatus, implStatus)
+			}
+			if refContentType != implContentType {
+				t.Fatalf("content type mismatch: ref=%q impl=%q", refContentType, implContentType)
+			}
+			tc.assert(t, refRaw, implRaw)
+		})
+	}
+}
+
 func TestRPCDeep_WebSocketNotificationsMatrix(t *testing.T) {
 	SkipIfNoRef(t)
 
@@ -246,6 +410,145 @@ func TestRPCDeep_WebSocketNotificationsMatrix(t *testing.T) {
 	if len(implFlow.Notifications) == 0 || implFlow.Notifications[0].Method != "aria2.onDownloadStart" {
 		t.Fatalf("WebSocket missing onDownloadStart notification: %#v", implFlow.Notifications)
 	}
+}
+
+func TestRPCDeep_WebSocketBatchMissingIDMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	refPort, implPort := startRPCPair(t, []string{"--no-conf"}, []string{"--no-conf"})
+	if !rpcFeatureEnabled(t, refPort, "WebSocket") {
+		t.Skip("reference aria2c does not advertise WebSocket support")
+	}
+
+	payload := []byte(`[
+		{"jsonrpc":"2.0","id":"ok","method":"aria2.getVersion","params":[]},
+		{"jsonrpc":"2.0","method":"aria2.getVersion","params":[]}
+	]`)
+
+	refBatch := wsBatchCall(t, openWebSocket(t, refPort), payload)
+	implBatch := wsBatchCall(t, openWebSocket(t, implPort), payload)
+
+	compareBatchEnvelope(t, refBatch, implBatch)
+	if len(refBatch) != 2 || len(implBatch) != 2 {
+		t.Fatalf("unexpected ws batch sizes: ref=%d impl=%d", len(refBatch), len(implBatch))
+	}
+	if refBatch[1].Error == nil || implBatch[1].Error == nil {
+		t.Fatalf("expected ws batch missing-id errors: ref=%#v impl=%#v", refBatch[1], implBatch[1])
+	}
+	if refBatch[1].Error.Code != implBatch[1].Error.Code {
+		t.Fatalf("ws batch missing-id error code mismatch: ref=%d impl=%d", refBatch[1].Error.Code, implBatch[1].Error.Code)
+	}
+	if string(refBatch[1].ID) != string(implBatch[1].ID) {
+		t.Fatalf("ws batch missing-id id mismatch: ref=%s impl=%s", refBatch[1].ID, implBatch[1].ID)
+	}
+	if string(refBatch[1].ID) != "null" {
+		t.Fatalf("ref ws batch missing-id id got %s want null", refBatch[1].ID)
+	}
+}
+
+func TestRPCDeep_WebSocketFragmentedMessageMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	refPort, implPort := startRPCPair(t, []string{"--no-conf"}, []string{"--no-conf"})
+	if !rpcFeatureEnabled(t, refPort, "WebSocket") {
+		t.Skip("reference aria2c does not advertise WebSocket support")
+	}
+
+	payload := []byte(`{"jsonrpc":"2.0","id":"frag","method":"system.listMethods","params":[]}`)
+	refResp := wsFragmentedCall(t, openWebSocket(t, refPort), 0x1, payload)
+	implResp := wsFragmentedCall(t, openWebSocket(t, implPort), 0x1, payload)
+
+	if string(refResp.ID) != string(implResp.ID) {
+		t.Fatalf("fragmented ws id mismatch: ref=%s impl=%s", refResp.ID, implResp.ID)
+	}
+	if refResp.JSONRPC != "2.0" || implResp.JSONRPC != "2.0" {
+		t.Fatalf("fragmented ws jsonrpc mismatch: ref=%q impl=%q", refResp.JSONRPC, implResp.JSONRPC)
+	}
+	if refResp.Error != nil || implResp.Error != nil {
+		t.Fatalf("fragmented ws returned errors: ref=%#v impl=%#v", refResp.Error, implResp.Error)
+	}
+	compareStringSet(t, "fragmented ws listMethods",
+		mustRPCStringSlice(t, "ref fragmented ws listMethods", refResp.Result),
+		mustRPCStringSlice(t, "impl fragmented ws listMethods", implResp.Result))
+}
+
+func TestRPCDeep_JSONRPCOversizedPOSTMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	refPort, implPort := startRPCPair(t,
+		[]string{"--no-conf", "--rpc-max-request-size=96"},
+		[]string{"--no-conf", "--rpc-max-request-size=96"},
+	)
+
+	req := fmt.Sprintf("POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n", refPort)
+	refRaw := rawHTTPExchange(t, refPort, req)
+	req = fmt.Sprintf("POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n", implPort)
+	implRaw := rawHTTPExchange(t, implPort, req)
+
+	if len(refRaw) != 0 {
+		t.Fatalf("reference oversized POST returned unexpected data: %q", string(refRaw))
+	}
+	if len(implRaw) != 0 {
+		t.Fatalf("impl oversized POST returned unexpected data: %q", string(implRaw))
+	}
+}
+
+func TestRPCDeep_SecureTransportMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+	if refUsesAppleTLS(t) {
+		t.Skip("reference aria2c uses AppleTLS; secure RPC needs KeyChain-backed certificate setup")
+	}
+
+	insecureRefPort, _ := startPairedRPCServers(t, "--no-conf")
+	if !rpcFeatureEnabled(t, insecureRefPort, "HTTPS") {
+		t.Skip("reference aria2c does not advertise HTTPS support")
+	}
+
+	_, _, pkcs12File := writeRPCSecureTestMaterial(t)
+	refPort := findFreePort(t)
+	implPort := findFreePort(t)
+
+	refSrv := startRPCRef(t, refPort,
+		"--no-conf",
+		"--rpc-secure=true",
+		"--rpc-certificate="+pkcs12File,
+	)
+	defer refSrv.Stop(t)
+	waitReadyHTTPS(t, refPort)
+
+	implArgs := []string{
+		"--no-conf",
+		"--rpc-secure=true",
+		"--rpc-certificate=" + pkcs12File,
+	}
+	implSrv := startRPCImpl(t, implPort, implArgs...)
+	defer implSrv.Stop(t)
+	waitReadyHTTPS(t, implPort)
+
+	client := insecureTLSHTTPClient()
+	reqBody := []byte(`{"jsonrpc":"2.0","id":"methods","method":"system.listMethods","params":[]}`)
+	refStatus, refRaw := rpcPostRaw(t, client, "https", refPort, reqBody)
+	implStatus, implRaw := rpcPostRaw(t, client, "https", implPort, reqBody)
+	if implStatus != refStatus {
+		t.Fatalf("secure HTTP status mismatch: ref=%d impl=%d", refStatus, implStatus)
+	}
+	refResp := decodeDeepRPCResponse(t, "ref secure HTTP", refRaw)
+	implResp := decodeDeepRPCResponse(t, "impl secure HTTP", implRaw)
+	if refResp.Error != nil || implResp.Error != nil {
+		t.Fatalf("secure HTTP returned errors: ref=%#v impl=%#v", refResp, implResp)
+	}
+	compareStringSet(t, "secure HTTP listMethods",
+		mustRPCStringSlice(t, "ref secure HTTP listMethods", refResp.Result),
+		mustRPCStringSlice(t, "impl secure HTTP listMethods", implResp.Result))
+
+	refWS := wsCall(t, openSecureWebSocket(t, refPort), []byte(`{"jsonrpc":"2.0","id":"ws","method":"system.listMethods","params":[]}`))
+	implWS := wsCall(t, openSecureWebSocket(t, implPort), []byte(`{"jsonrpc":"2.0","id":"ws","method":"system.listMethods","params":[]}`))
+	if refWS.Error != nil || implWS.Error != nil {
+		t.Fatalf("secure WS returned errors: ref=%#v impl=%#v", refWS, implWS)
+	}
+	compareStringSet(t, "secure WS listMethods",
+		mustRPCStringSlice(t, "ref secure WS listMethods", refWS.Result),
+		mustRPCStringSlice(t, "impl secure WS listMethods", implWS.Result))
 }
 
 func TestRPCDeep_SaveSessionSideEffectsMatrix(t *testing.T) {
@@ -410,6 +713,45 @@ func rpcPostBatch(t *testing.T, port int, requests any) (int, []rpcDeepWireRespo
 	return resp.StatusCode, decodeDeepRPCBatch(t, "batch response", raw)
 }
 
+func rpcPostRaw(t *testing.T, client *http.Client, scheme string, port int, body []byte) (int, json.RawMessage) {
+	t.Helper()
+	resp, err := client.Post(scheme+"://127.0.0.1:"+strconv.Itoa(port)+"/jsonrpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post raw RPC: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read raw RPC response: %v", err)
+	}
+	return resp.StatusCode, json.RawMessage(raw)
+}
+
+func rawHTTPExchange(t *testing.T, port int, request string) []byte {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial raw HTTP: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write raw HTTP request: %v", err)
+	}
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	raw, err := io.ReadAll(conn)
+	if err != nil {
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			t.Fatalf("timed out waiting for raw HTTP response on port %d", port)
+		}
+		t.Fatalf("read raw HTTP response: %v", err)
+	}
+	return raw
+}
+
 func decodeDeepRPCResponse(t *testing.T, label string, raw []byte) rpcDeepWireResponse {
 	t.Helper()
 	var resp rpcDeepWireResponse
@@ -533,7 +875,18 @@ func jsonRPCGETBatchQuery(batch []map[string]any, callback string) url.Values {
 func rpcJSONPGET(t *testing.T, port int, values url.Values, callback string) (int, string, json.RawMessage) {
 	t.Helper()
 	u := "http://127.0.0.1:" + strconv.Itoa(port) + "/jsonrpc?" + values.Encode()
-	resp, err := httpClient.Get(u)
+	return rpcJSONPGETURL(t, httpClient, u, callback)
+}
+
+func rpcJSONPGETRaw(t *testing.T, port int, rawQuery string, callback string) (int, string, json.RawMessage) {
+	t.Helper()
+	u := "http://127.0.0.1:" + strconv.Itoa(port) + "/jsonrpc?" + rawQuery
+	return rpcJSONPGETURL(t, httpClient, u, callback)
+}
+
+func rpcJSONPGETURL(t *testing.T, client *http.Client, u string, callback string) (int, string, json.RawMessage) {
+	t.Helper()
+	resp, err := client.Get(u)
 	if err != nil {
 		t.Fatalf("GET JSONP: %v", err)
 	}
@@ -548,6 +901,15 @@ func rpcJSONPGET(t *testing.T, port int, values url.Values, callback string) (in
 	}
 	inner := raw[len(prefix) : len(raw)-1]
 	return resp.StatusCode, resp.Header.Get("Content-Type"), json.RawMessage(inner)
+}
+
+func mustRPCStringSlice(t *testing.T, label string, raw json.RawMessage) []string {
+	t.Helper()
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		t.Fatalf("%s: unmarshal []string: %v raw=%s", label, err, string(raw))
+	}
+	return values
 }
 
 type xmlRPCReply struct {
@@ -962,14 +1324,200 @@ func openWebSocket(t *testing.T, port int) net.Conn {
 	return conn
 }
 
+func openSecureWebSocket(t *testing.T, port int) net.Conn {
+	t.Helper()
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("dial secure websocket: %v", err)
+	}
+	keyBytes := make([]byte, 16)
+	if _, err := rand.Read(keyBytes); err != nil {
+		conn.Close()
+		t.Fatalf("secure websocket key rand: %v", err)
+	}
+	key := base64.StdEncoding.EncodeToString(keyBytes)
+	req := fmt.Sprintf("GET /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", port, key)
+	if _, err := io.WriteString(conn, req); err != nil {
+		conn.Close()
+		t.Fatalf("write secure websocket handshake: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		conn.Close()
+		t.Fatalf("read secure websocket status: %v", err)
+	}
+	if !strings.Contains(status, "101") {
+		conn.Close()
+		t.Fatalf("secure websocket status got %q want 101", strings.TrimSpace(status))
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			t.Fatalf("read secure websocket header: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	if br.Buffered() != 0 {
+		conn.Close()
+		t.Fatalf("secure websocket handshake left %d buffered bytes", br.Buffered())
+	}
+	return conn
+}
+
+func wsCall(t *testing.T, conn net.Conn, payload []byte) rpcDeepWireResponse {
+	t.Helper()
+	defer conn.Close()
+
+	writeWSClientText(t, conn, payload)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	opcode, msg, err := readWSServerFrame(conn)
+	if err != nil {
+		t.Fatalf("read ws response: %v", err)
+	}
+	if opcode != 0x1 {
+		t.Fatalf("ws opcode got %#x want text", opcode)
+	}
+	return decodeDeepRPCResponse(t, "ws response", msg)
+}
+
+func wsFragmentedCall(t *testing.T, conn net.Conn, opcode byte, payload []byte) rpcDeepWireResponse {
+	t.Helper()
+	defer conn.Close()
+
+	split := len(payload) / 2
+	writeWSClientFrame(t, conn, opcode, false, payload[:split])
+	writeWSClientFrame(t, conn, 0x0, true, payload[split:])
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	opcode, msg, err := readWSServerFrame(conn)
+	if err != nil {
+		t.Fatalf("read fragmented ws response: %v", err)
+	}
+	if opcode != 0x1 {
+		t.Fatalf("fragmented ws opcode got %#x want text", opcode)
+	}
+	return decodeDeepRPCResponse(t, "fragmented ws response", msg)
+}
+
+func wsBatchCall(t *testing.T, conn net.Conn, payload []byte) []rpcDeepWireResponse {
+	t.Helper()
+	defer conn.Close()
+
+	writeWSClientText(t, conn, payload)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	opcode, msg, err := readWSServerFrame(conn)
+	if err != nil {
+		t.Fatalf("read ws batch response: %v", err)
+	}
+	if opcode != 0x1 {
+		t.Fatalf("ws batch opcode got %#x want text", opcode)
+	}
+	return decodeDeepRPCBatch(t, "ws batch response", msg)
+}
+
+func insecureTLSHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+}
+
+func waitReadyHTTPS(t *testing.T, port int) {
+	t.Helper()
+	client := insecureTLSHTTPClient()
+	body := []byte(`{"jsonrpc":"2.0","id":"1","method":"system.listMethods","params":[]}`)
+	for i := 0; i < 50; i++ {
+		resp, err := client.Post("https://127.0.0.1:"+strconv.Itoa(port)+"/jsonrpc", "application/json", bytes.NewReader(body))
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("secure rpc server on port %d did not become ready", port)
+}
+
+func writeRPCSecureTestMaterial(t *testing.T) (certFile, keyFile, pkcs12File string) {
+	t.Helper()
+	if _, err := exec.LookPath("openssl"); err != nil {
+		t.Skip("openssl not available")
+	}
+
+	dir := t.TempDir()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate() error = %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+
+	certFile = filepath.Join(dir, "rpc-cert.pem")
+	keyFile = filepath.Join(dir, "rpc-key.pem")
+	pkcs12File = filepath.Join(dir, "rpc-cert.p12")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cmd := exec.Command("openssl", "pkcs12", "-export", "-out", pkcs12File, "-inkey", keyFile, "-in", certFile, "-passout", "pass:")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("openssl pkcs12 export: %v output=%s", err, string(out))
+	}
+	return certFile, keyFile, pkcs12File
+}
+
+func refUsesAppleTLS(t *testing.T) bool {
+	t.Helper()
+	result, err := RunRef(t, []string{"-v"}, "")
+	if err != nil {
+		t.Fatalf("run ref -v: %v", err)
+	}
+	return strings.Contains(result.Stdout, "AppleTLS") || strings.Contains(result.Stderr, "AppleTLS")
+}
+
 func writeWSClientText(t *testing.T, w io.Writer, payload []byte) {
+	t.Helper()
+	writeWSClientFrame(t, w, 0x1, true, payload)
+}
+
+func writeWSClientFrame(t *testing.T, w io.Writer, opcode byte, fin bool, payload []byte) {
 	t.Helper()
 	mask := [4]byte{}
 	if _, err := rand.Read(mask[:]); err != nil {
 		t.Fatalf("websocket mask rand: %v", err)
 	}
 	var frame bytes.Buffer
-	frame.WriteByte(0x81)
+	first := opcode & 0x0f
+	if fin {
+		first |= 0x80
+	}
+	frame.WriteByte(first)
 	n := len(payload)
 	switch {
 	case n <= 125:

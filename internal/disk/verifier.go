@@ -22,15 +22,17 @@ type Verifier struct {
 	adaptor     Adaptor
 	pieceHashes [][]byte
 	hashKind    hash.Kind
+	pieceLen    int64
 }
 
 // NewVerifier creates a Verifier that will verify piece hashes using the
-// given Adaptor. pieceLen is derived internally from a.Size() / len(pieceHashes).
-func NewVerifier(a Adaptor, pieceHashes [][]byte, hashKind hash.Kind) *Verifier {
+// given Adaptor and piece length.
+func NewVerifier(a Adaptor, pieceHashes [][]byte, hashKind hash.Kind, pieceLen int64) *Verifier {
 	return &Verifier{
 		adaptor:     a,
 		pieceHashes: pieceHashes,
 		hashKind:    hashKind,
+		pieceLen:    pieceLen,
 	}
 }
 
@@ -45,7 +47,7 @@ func (v *Verifier) Verify(ctx context.Context) (badIndices []int, err error) {
 	}
 
 	size := v.adaptor.Size()
-	pieceLen := size / int64(len(v.pieceHashes))
+	pieceLen := v.pieceLen
 	if pieceLen == 0 {
 		return nil, nil
 	}

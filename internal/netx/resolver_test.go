@@ -14,6 +14,10 @@ import (
 // the test resolver's Dial function is exercised.
 const testHost = "google.com"
 
+func cacheKeyForResolver(r *Resolver, host string) resolverCacheKey {
+	return resolverCacheKey{host: host, enableIPv6: r.enableIPv6}
+}
+
 func TestNewResolver(t *testing.T) {
 	r := NewResolver()
 	if r == nil {
@@ -24,6 +28,28 @@ func TestNewResolver(t *testing.T) {
 	}
 	if r.ttl != defaultTTL {
 		t.Fatalf("expected ttl %v, got %v", defaultTTL, r.ttl)
+	}
+}
+
+func TestNewResolverWithConfig(t *testing.T) {
+	r := NewResolverWithConfig(ResolverConfig{
+		Servers:    "8.8.8.8, [2001:4860:4860::8888]:5353 ,1.1.1.1:54",
+		EnableIPv6: true,
+	})
+	if !r.enableIPv6 {
+		t.Fatal("enableIPv6 = false, want true")
+	}
+	if len(r.servers) != 3 {
+		t.Fatalf("servers = %v, want 3 entries", r.servers)
+	}
+	want := []string{"8.8.8.8:53", "[2001:4860:4860::8888]:5353", "1.1.1.1:54"}
+	for i := range want {
+		if r.servers[i] != want[i] {
+			t.Fatalf("servers[%d] = %q, want %q", i, r.servers[i], want[i])
+		}
+	}
+	if r.resolver == net.DefaultResolver {
+		t.Fatal("resolver should use custom dialer when servers are configured")
 	}
 }
 
@@ -56,7 +82,7 @@ func TestLookupHost_CacheHit(t *testing.T) {
 	}
 
 	// Verify cache is populated.
-	_, ok := r.cache.Load(testHost)
+	_, ok := r.cache.Load(cacheKeyForResolver(r, testHost))
 	if !ok {
 		t.Fatal("cache should have an entry after first lookup")
 	}
@@ -104,7 +130,7 @@ func TestLookupHost_CacheExpiry(t *testing.T) {
 	// Wait for the cache entry to expire.
 	time.Sleep(20 * time.Millisecond)
 
-	v, ok := r.cache.Load(testHost)
+	v, ok := r.cache.Load(cacheKeyForResolver(r, testHost))
 	if !ok {
 		t.Fatal("expired entry should still be in cache (lazy eviction)")
 	}
@@ -275,7 +301,7 @@ func TestLookupHost_ReturnsCopy(t *testing.T) {
 	}
 
 	// Capture the cached value before mutating.
-	v, ok := r.cache.Load(testHost)
+	v, ok := r.cache.Load(cacheKeyForResolver(r, testHost))
 	if !ok {
 		t.Fatal("cache entry missing")
 	}
@@ -286,7 +312,7 @@ func TestLookupHost_ReturnsCopy(t *testing.T) {
 	addrs1[0] = "255.255.255.255"
 
 	// The cache should still have the original value.
-	v, ok = r.cache.Load(testHost)
+	v, ok = r.cache.Load(cacheKeyForResolver(r, testHost))
 	if !ok {
 		t.Fatal("cache entry missing after mutation")
 	}
@@ -307,7 +333,7 @@ func TestLookupHost_CachePersistence(t *testing.T) {
 	}
 
 	// Verify the cache entry exists.
-	v, ok := r.cache.Load("localhost")
+	v, ok := r.cache.Load(cacheKeyForResolver(r, "localhost"))
 	if !ok {
 		t.Fatal("cache entry should exist after lookup")
 	}
@@ -320,7 +346,7 @@ func TestLookupHost_CachePersistence(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Expired entry should still be in the map (lazy eviction).
-	_, ok = r.cache.Load("localhost")
+	_, ok = r.cache.Load(cacheKeyForResolver(r, "localhost"))
 	if !ok {
 		t.Fatal("expired entry should remain in map for lazy eviction")
 	}

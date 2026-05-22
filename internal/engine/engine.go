@@ -1,24 +1,28 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/smartass08/aria2go/internal/config"
@@ -42,6 +46,7 @@ import (
 	rpc_transport "github.com/smartass08/aria2go/internal/rpc/transport"
 	"github.com/smartass08/aria2go/internal/sessionfile"
 	"github.com/smartass08/aria2go/internal/tlsx"
+	"github.com/smartass08/aria2go/internal/torrent"
 )
 
 // ShutdownDelay is the delay before shutdown actually executes, matching
@@ -56,12 +61,22 @@ const numGIDShards = 64
 // requestGroup represents a single download in the engine's lifecycle.
 // It mirrors aria2's RequestGroup class state machine but uses Go contexts
 // for cancellation instead of the command/event-poll pattern.
+type haltReason uint8
+
+const (
+	haltReasonNone haltReason = iota
+	haltReasonUserRequest
+	haltReasonShutdown
+)
+
 type requestGroup struct {
 	gid          core.GID
 	opts         *config.Options
+	localOpts    *config.Options
 	uris         []string
 	torrent      []byte
 	metalinkData []byte
+	metadataURI  string
 	state        core.Status
 
 	created       time.Time
@@ -71,6 +86,7 @@ type requestGroup struct {
 	restartReq    bool
 	forceHaltReq  bool
 	haltRequested bool
+	haltReason    haltReason
 
 	belongsTo  core.GID
 	following  core.GID
@@ -81,6 +97,7 @@ type requestGroup struct {
 	pendingOpts *config.Options
 
 	filePath          string
+	fileEntries       []disk.FileEntry
 	inMemory          bool
 	controlPath       string
 	controlLoaded     bool
@@ -91,21 +108,36 @@ type requestGroup struct {
 	probed            bool
 	probedSize        int64
 	acceptsRanges     bool
+	inflatedResponse  bool
 	cdFilename        string
 	lastModified      time.Time
 
-	completedLength int64
-	totalLength     int64
-	numConnections  int
-	numSeeders      int
-	fileName        string
-	bytesDownloaded int64
-	bytesUploaded   int64
-	lastSpeedSample time.Time
+	completedLength    int64
+	totalLength        int64
+	numConnections     int
+	numSeeders         int
+	fileName           string
+	resumeFailureCount int
+	bytesDownloaded    int64
+	bytesUploaded      int64
+	sessionUploaded    int64
+	lastSpeedSample    time.Time
 
 	downloadLimit *Throttle
+	uploadLimit   *Throttle
+	btSwarm       atomic.Pointer[btSwarm]
 
 	filePathFromURI bool
+	btInfoHash      string
+	btUnselected    []string
+	uriUsed         bool
+	activeURI       string
+	activeHosts     map[string]int
+	integrity       downloadIntegrity
+	integrityRetry  int
+	integrityMu     sync.Mutex
+
+	resumeBlockedURIs map[string]struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -163,6 +195,10 @@ func (m *gidShardMap) delete(gid core.GID) {
 	s.mu.Unlock()
 }
 
+func (m *gidShardMap) deleteLocked(gid core.GID) {
+	delete(m.shard(gid).groups, gid)
+}
+
 func (m *gidShardMap) getLocked(gid core.GID) (*requestGroup, bool) {
 	s := m.shard(gid)
 	s.mu.Lock()
@@ -202,6 +238,8 @@ var drPool = sync.Pool{
 type Engine struct {
 	cfg *config.Options
 	log *slog.Logger
+
+	startupTemplate *config.Options
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -249,12 +287,18 @@ type Engine struct {
 	console     *console.Console
 	lpdListener *lpd.Listener
 	btSession   *BtSession
+	serverStats *ServerStatMan
 
 	rateGlobal   *Throttle
 	rateGlobalUp *Throttle
 
 	saveInterval        time.Duration
 	saveSessionInterval time.Duration
+	inputParser         *sessionfile.Parser
+	shutdownSession     []sessionfile.Entry
+	shutdownExitPending atomic.Bool
+	shutdownExitLastErr atomic.Int64
+	shutdownHadActive   atomic.Bool
 	lastSessionHash     [20]byte
 	hasSessionHash      bool
 
@@ -270,6 +314,8 @@ type AddSpec struct {
 	Options     *config.Options
 	Torrent     []byte
 	Metalink    []byte
+	MetadataURI string
+	OutputName  string
 	Position    int
 	PositionSet bool
 	BelongsTo   core.GID
@@ -326,19 +372,34 @@ type URIStatus struct {
 	Status string `json:"status"`
 }
 
+type PeerStatus struct {
+	PeerID        string
+	IP            string
+	Port          string
+	Bitfield      string
+	AmChoking     bool
+	PeerChoking   bool
+	DownloadSpeed int64
+	UploadSpeed   int64
+	Seeder        bool
+}
+
 // downloadResult holds the final state of a completed/error/removed download,
 // mirroring aria2's DownloadResult / downloadResults_ queue.
 type downloadResult struct {
-	gid        core.GID
-	state      core.Status
-	errCode    core.ErrorCode
-	errMsg     string
-	belongsTo  core.GID
-	following  core.GID
-	followedBy []core.GID
-	opts       *config.Options
+	gid         core.GID
+	state       core.Status
+	errCode     core.ErrorCode
+	errMsg      string
+	belongsTo   core.GID
+	following   core.GID
+	followedBy  []core.GID
+	opts        *config.Options
+	localOpts   *config.Options
+	metadataURI string
 
 	filePath              string
+	statusSnapshot        Status
 	totalLength           int64
 	completedLength       int64
 	sessionDownloadLength int64
@@ -407,25 +468,30 @@ func New(cfg *config.Options, log *slog.Logger) (*Engine, error) {
 	}
 
 	e := &Engine{
-		cfg:          cfg,
-		log:          log,
-		groups:       newGIDShardMap(maxDownloads * 2),
-		active:       make([]core.GID, 0, maxDownloads),
-		waiting:      make([]core.GID, 0, maxDownloads),
-		queueWake:    make(chan struct{}, 1),
-		usedGIDs:     make(map[core.GID]struct{}),
-		stoppedRing:  newStoppedRing(maxResults),
-		bus:          NewEventBus(),
-		sessionID:    newSessionID(),
-		created:      time.Now(),
-		keepRunning:  cfg.EnableRPC,
-		httpDriver:   httpDriver,
-		netDialer:    dialer,
-		cookieJar:    cookieJar,
-		authFactory:  authFactory,
-		rateGlobal:   NewThrottle(parseSize(cfg.MaxOverallDownloadLimit)),
-		rateGlobalUp: NewThrottle(parseSize(cfg.MaxOverallUploadLimit)),
-		btSession:    NewBtSession(cfg),
+		cfg:             cfg,
+		log:             log,
+		startupTemplate: config.Merge(cfg),
+		groups:          newGIDShardMap(maxDownloads * 2),
+		active:          make([]core.GID, 0, maxDownloads),
+		waiting:         make([]core.GID, 0, maxDownloads),
+		queueWake:       make(chan struct{}, 1),
+		usedGIDs:        make(map[core.GID]struct{}),
+		stoppedRing:     newStoppedRing(maxResults),
+		bus:             NewEventBus(),
+		sessionID:       newSessionID(),
+		created:         time.Now(),
+		keepRunning:     cfg.EnableRPC,
+		httpDriver:      httpDriver,
+		netDialer:       dialer,
+		cookieJar:       cookieJar,
+		authFactory:     authFactory,
+		serverStats:     NewServerStatMan(),
+		rateGlobal:      NewThrottle(parseSize(cfg.MaxOverallDownloadLimit)),
+		rateGlobalUp:    NewThrottle(parseSize(cfg.MaxOverallUploadLimit)),
+		btSession:       NewBtSession(cfg),
+	}
+	if err := e.loadServerStats(cfg); err != nil {
+		log.Warn("failed to load server stats", "error", err)
 	}
 
 	if cfg.BTEnableLPD {
@@ -480,11 +546,19 @@ func New(cfg *config.Options, log *slog.Logger) (*Engine, error) {
 }
 
 func engineConsoleOptions(cfg *config.Options) console.Options {
+	summaryInterval := time.Duration(parseInt(cfg.SummaryInterval)) * time.Second
+	if summaryInterval < 0 {
+		summaryInterval = 0
+	}
 	return console.Options{
-		Quiet:       cfg.Quiet,
-		Summary:     cfg.SummaryInterval != "",
-		Interactive: !cfg.Quiet,
-		Stderr:      cfg.Stderr,
+		Quiet:           cfg.Quiet,
+		SummaryInterval: summaryInterval,
+		Interactive:     !cfg.Quiet,
+		Stderr:          cfg.Stderr,
+		ShowReadout:     cfg.ShowConsoleReadout,
+		ShowReadoutSet:  true,
+		Truncate:        cfg.TruncateConsoleReadout,
+		TruncateSet:     true,
 	}
 }
 
@@ -493,13 +567,22 @@ func engineDialerConfig(cfg *config.Options) netx.DialerConfig {
 		Timeout:              time.Duration(parseInt(cfg.ConnectTimeout)) * time.Second,
 		KeepAlive:            30 * time.Second,
 		Interface:            cfg.Interface,
-		PreferIPv4:           !cfg.DisableIPv6,
-		ProxyURL:             resolveProxyURI("http", cfg),
+		PreferIPv4:           cfg.DisableIPv6,
+		DisableIPv6:          cfg.DisableIPv6,
+		AsyncDNS:             cfg.AsyncDNS,
+		EnableAsyncDNS6:      cfg.EnableAsyncDNS6,
+		AsyncDNSServer:       cfg.AsyncDNSServer,
 		SocketRecvBufferSize: parseInt(cfg.SocketRecvBufferSize),
 		DSCP:                 parseInt(cfg.DSCP),
 		Interfaces:           cfg.MultipleInterface,
 		NoProxy:              cfg.NoProxy,
 	}
+}
+
+func engineDialerConfigWithoutProxy(cfg *config.Options) netx.DialerConfig {
+	dialerCfg := engineDialerConfig(cfg)
+	dialerCfg.ProxyURL = ""
+	return dialerCfg
 }
 
 func httpClientTLSConfig(cfg *config.Options) (*tls.Config, error) {
@@ -523,7 +606,7 @@ func httpClientTLSConfig(cfg *config.Options) (*tls.Config, error) {
 		}
 	}
 	var clientKey []byte
-	if cfg.PrivateKey != "" {
+	if cfg.Certificate != "" && cfg.PrivateKey != "" {
 		clientKey, err = os.ReadFile(cfg.PrivateKey)
 		if err != nil {
 			return nil, fmt.Errorf("read private-key: %w", err)
@@ -545,14 +628,8 @@ func newHTTPCookieJar(cfg *config.Options, log *slog.Logger) *cookies.Jar {
 	if cfg.LoadCookies == "" {
 		return jar
 	}
-	f, err := os.Open(cfg.LoadCookies)
-	if err != nil {
+	if err := jar.LoadFile(cfg.LoadCookies); err != nil {
 		log.Error("failed to load cookies", "path", cfg.LoadCookies, "error", err)
-		return jar
-	}
-	defer f.Close()
-	if err := jar.LoadNetscape(f); err != nil {
-		log.Error("failed to parse cookies", "path", cfg.LoadCookies, "error", err)
 		return jar
 	}
 	log.Info("loaded cookies", "path", cfg.LoadCookies)
@@ -620,8 +697,26 @@ func expandHomePath(path string) string {
 func engineDHTConfig(port int, cfg *config.Options) dht.Config {
 	return dht.Config{
 		Addr:      fmt.Sprintf(":%d", port),
+		Bootstrap: dhtBootstrapAddrs(cfg),
 		PersistTo: cfg.DHTFilePath,
 	}
+}
+
+func dhtBootstrapAddrs(cfg *config.Options) []string {
+	if cfg == nil {
+		return nil
+	}
+	host, port := cfg.DHTEntryPointHost, cfg.DHTEntryPointPort
+	if host != "" {
+		if port == "" {
+			port = "6881"
+		}
+		return []string{net.JoinHostPort(host, port)}
+	}
+	if len(cfg.DHTEntryPoint) == 0 {
+		return nil
+	}
+	return append([]string(nil), cfg.DHTEntryPoint...)
 }
 
 // SetDispatcherFactory sets the factory function used to create an RPC dispatcher
@@ -719,18 +814,46 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.ctx, e.cancel = context.WithCancel(ctx)
 	e.running.Store(true)
 	defer e.running.Store(false)
+	if e.btSession != nil {
+		defer e.btSession.Close()
+	}
+	defer func() {
+		if e.inputParser != nil {
+			_ = e.inputParser.Close()
+			e.inputParser = nil
+		}
+	}()
 
 	e.log.Info("engine started", "session", e.sessionID)
 
-	if e.cfg.InputFile != "" {
-		if err := e.loadInputFile(e.cfg.InputFile); err != nil {
-			e.log.Warn("failed to load input file", "path", e.cfg.InputFile, "error", err)
+	startupInput := ""
+	startupDeferred := false
+	if e.startupTemplate != nil {
+		startupInput = e.startupTemplate.InputFile
+		startupDeferred = e.startupTemplate.DeferredInput
+	}
+
+	if startupInput != "" {
+		if startupDeferred {
+			parser, err := sessionfile.OpenParser(startupInput)
+			if err != nil {
+				return fmt.Errorf("engine: input file: %w", err)
+			}
+			e.inputParser = parser
+		} else {
+			runtimeCfg := e.cfg
+			e.cfg = e.startupTemplate
+			err := e.loadInputFile(startupInput)
+			e.cfg = runtimeCfg
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	// 1. Load session if path exists. If input-file and save-session point to
 	// the same path, load it once through the input-file path.
-	if e.cfg.SaveSession != "" && e.cfg.SaveSession != e.cfg.InputFile {
+	if e.cfg.SaveSession != "" && e.cfg.SaveSession != startupInput {
 		if err := e.LoadSession(e.cfg.SaveSession); err != nil {
 			e.log.Warn("failed to load session", "error", err)
 		}
@@ -749,6 +872,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		e.rpcServer = ts
 	}
+
+	// 2. Start queue manager (scheduler)
+	e.startLifecycleWatchers()
 
 	// 2. Start queue manager (scheduler)
 	e.wg.Add(1)
@@ -810,6 +936,9 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	e.showDownloadResults()
 	e.saveHTTPCookies()
+	if err := e.saveServerStats(); err != nil {
+		e.log.Warn("failed to save server stats", "error", err)
+	}
 
 	// Save session on exit (only if path configured)
 	if e.cfg.SaveSession != "" {
@@ -875,36 +1004,119 @@ func (e *Engine) saveHTTPCookies() {
 	e.log.Info("saved cookies", "path", e.cfg.SaveCookies)
 }
 
+func (e *Engine) startLifecycleWatchers() {
+	if stopAfter := time.Duration(parseInt(e.cfg.Stop)) * time.Second; stopAfter > 0 {
+		e.wg.Add(1)
+		go e.runStopTimer(stopAfter)
+	}
+	if pid := e.cfg.StopWithProcess; pid > 0 {
+		e.wg.Add(1)
+		go e.runProcessWatch(pid)
+	}
+}
+
+func (e *Engine) runStopTimer(stopAfter time.Duration) {
+	defer e.wg.Done()
+
+	timer := time.NewTimer(stopAfter)
+	defer timer.Stop()
+
+	select {
+	case <-e.ctx.Done():
+		return
+	case <-timer.C:
+		if e.shuttingDown.Load() || e.ctx.Err() != nil {
+			return
+		}
+		e.log.Info("stop timer elapsed", "after", stopAfter)
+		_ = e.Shutdown(false)
+	}
+}
+
+func (e *Engine) runProcessWatch(pid int) {
+	defer e.wg.Done()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			if e.shuttingDown.Load() {
+				return
+			}
+			if processRunning(pid) {
+				continue
+			}
+			e.log.Info("watched process exited; commencing shutdown", "pid", pid)
+			_ = e.Shutdown(false)
+			return
+		}
+	}
+}
+
+func processRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, os.ErrProcessDone) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "operation not permitted") || strings.Contains(msg, "access is denied")
+}
+
 // Shutdown initiates an orderly shutdown. If force is true, the shutdown
 // is immediate (matching aria2's requestForceHalt). Otherwise, active
 // downloads are requested to halt gracefully (requestHalt).
 func (e *Engine) Shutdown(force bool) error {
-	if e.shuttingDown.Swap(true) {
+	if !e.shuttingDown.CompareAndSwap(false, true) {
+		if force {
+			e.log.Info("shutdown escalation requested", "force", true)
+			e.markActiveShutdown(force)
+			e.haltReq.Store(true)
+			if e.cancel != nil {
+				e.cancel()
+			}
+			return nil
+		}
 		return fmt.Errorf("engine: already shutting down")
 	}
-
 	e.log.Info("shutdown requested", "force", force)
+	e.markActiveShutdown(force)
 
+	e.haltReq.Store(true)
+	if e.cancel != nil {
+		e.cancel()
+	}
+	return nil
+}
+
+func (e *Engine) markActiveShutdown(force bool) {
 	e.queuesMu.Lock()
 	for _, gid := range e.active {
 		rg, ok := e.groups.getLocked(gid)
 		if !ok {
 			continue
 		}
-		if rg.cancel != nil {
-			if force {
-				rg.forceHaltReq = true
-			} else {
-				rg.haltRequested = true
-			}
+		rg.haltRequested = true
+		rg.haltReason = haltReasonShutdown
+		if force {
+			rg.forceHaltReq = true
 		}
 		e.groups.unlock(gid)
 	}
 	e.queuesMu.Unlock()
-
-	e.haltReq.Store(true)
-	e.cancel()
-	return nil
 }
 
 // ShutdownDelayed schedules a shutdown after ShutdownDelay, matching
@@ -937,6 +1149,7 @@ func (e *Engine) Add(spec AddSpec) (core.GID, error) {
 	if opts == nil {
 		opts = &config.Options{}
 	}
+	localOpts := config.CloneExplicitOptions(opts)
 	opts = config.Merge(e.cfg, opts)
 
 	gid, err := e.gidForOptions(opts)
@@ -947,6 +1160,8 @@ func (e *Engine) Add(spec AddSpec) (core.GID, error) {
 	filePathFromURI := false
 	if opts.Out != "" {
 		filePath = filepath.Join(opts.Dir, opts.Out)
+	} else if spec.OutputName != "" {
+		filePath = filepath.Join(opts.Dir, spec.OutputName)
 	} else if len(spec.URIs) > 0 {
 		filePath = defaultOutputPathFromURI(spec.URIs[0])
 		filePathFromURI = true
@@ -954,9 +1169,11 @@ func (e *Engine) Add(spec AddSpec) (core.GID, error) {
 	rg := &requestGroup{
 		gid:             gid,
 		opts:            opts,
+		localOpts:       localOpts,
 		uris:            spec.URIs,
 		torrent:         spec.Torrent,
 		metalinkData:    spec.Metalink,
+		metadataURI:     spec.MetadataURI,
 		state:           core.StatusWaiting,
 		created:         time.Now(),
 		pauseReq:        opts.Pause && e.keepRunning,
@@ -964,9 +1181,8 @@ func (e *Engine) Add(spec AddSpec) (core.GID, error) {
 		filePath:        filePath,
 		filePathFromURI: filePathFromURI,
 	}
-
-	if dl := parseSize(opts.MaxDownloadLimit); dl > 0 {
-		rg.downloadLimit = NewThrottle(dl)
+	if err := e.applyRequestGroupRuntimeOptions(rg, opts); err != nil {
+		return 0, err
 	}
 
 	e.groups.set(gid, rg)
@@ -994,6 +1210,77 @@ func (e *Engine) Add(spec AddSpec) (core.GID, error) {
 	return gid, nil
 }
 
+func (e *Engine) AddMetalink(data []byte, opts *config.Options, pos int, posSet bool) ([]core.GID, error) {
+	specs, err := metalinkAddSpecs(data, opts)
+	if err != nil {
+		return nil, err
+	}
+	gids := make([]core.GID, 0, len(specs))
+	for i, spec := range specs {
+		if posSet {
+			spec.PositionSet = true
+			spec.Position = pos + i
+		}
+		gid, err := e.Add(spec)
+		if err != nil {
+			return nil, err
+		}
+		gids = append(gids, gid)
+	}
+	return gids, nil
+}
+
+func metalinkAddSpecs(data []byte, opts *config.Options) ([]AddSpec, error) {
+	parseOpts, queryOpts := metalinkOptions(opts)
+	doc, err := metalink.ParseWithOptions(bytes.NewReader(data), parseOpts)
+	if err != nil {
+		return nil, err
+	}
+	doc = metalink.Query(doc, queryOpts)
+
+	var selected []bool
+	if opts != nil && opts.SelectFile != "" {
+		selected, err = parseBTSelectedFiles(opts.SelectFile, len(doc.Files))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	specs := make([]AddSpec, 0, len(doc.Files))
+	for fileIndex, file := range doc.Files {
+		if len(selected) > 0 && !selected[fileIndex] {
+			continue
+		}
+
+		urls := metalink.OrderURLs(file.URLs, queryOpts)
+
+		uris := make([]string, 0, len(urls))
+		for _, u := range urls {
+			if u.URL != "" {
+				uris = append(uris, u.URL)
+			}
+		}
+		if len(uris) == 0 {
+			continue
+		}
+
+		specOpts := config.Merge(opts)
+		specOpts.Out = ""
+		specOpts.ClearExplicit("out")
+		specOpts.GID = ""
+		specOpts.ClearExplicit("gid")
+
+		specs = append(specs, AddSpec{
+			URIs:        uris,
+			Options:     specOpts,
+			MetadataURI: specOpts.MetalinkFile,
+			OutputName:  file.Name,
+		})
+	}
+
+	return specs, nil
+}
+
 func (e *Engine) gidForOptions(opts *config.Options) (core.GID, error) {
 	if opts.GID == "" {
 		return e.nextGID(), nil
@@ -1017,12 +1304,12 @@ func (e *Engine) gidForOptions(opts *config.Options) (core.GID, error) {
 	return gid, nil
 }
 
-// Pause pauses an active or waiting download. If the download is active,
-// its context is cancelled, the download worker stops, and the group is
-// moved to the waiting queue with pause-requested flag (matching aria2's
-// behavior of moving paused groups to reservedGroups_ with pauseRequested_).
+// Pause pauses an active or waiting download. For an active download, this
+// mirrors aria2's pauseRequestGroup(): it marks the group paused, requests the
+// active worker to halt, and lets removeStoppedGroup finalize the transition to
+// the waiting queue and fire pause hooks once the worker stops.
 //
-// If force is true, the pause is immediate (force-halt semantics).
+// If force is true, the active worker is force-halted.
 func (e *Engine) Pause(gid core.GID, force bool) error {
 	rg, ok := e.groups.getLocked(gid)
 	if !ok {
@@ -1034,41 +1321,53 @@ func (e *Engine) Pause(gid core.GID, force bool) error {
 		return fmt.Errorf("engine: download GID#%s is already paused", gid)
 	}
 
-	e.queuesMu.Lock()
-	defer e.queuesMu.Unlock()
-
 	switch rg.state {
 	case core.StatusActive:
 		rg.pauseReq = true
 		if force {
 			rg.forceHaltReq = true
+		} else {
+			rg.haltRequested = true
 		}
 		if rg.cancel != nil {
 			rg.cancel()
+			e.log.Info("download pause requested", "gid", gid, "force", force)
+		} else {
+			// Tests can synthesize an active group without a running worker.
+			// Finalize the pause inline so the group does not remain stuck active.
+			e.queuesMu.Lock()
+			e.moveFromActiveLocked(gid)
+			e.waiting = append([]core.GID{gid}, e.waiting...)
+			e.queuesMu.Unlock()
+			rg.state = core.StatusWaiting
+			rg.haltRequested = false
+			rg.forceHaltReq = false
+			e.runHookByName(rg, 1, "on-download-pause")
+			e.emit(core.EvPause, gid)
+			e.log.Info("download paused", "gid", gid, "force", force)
 		}
-		e.moveFromActiveLocked(gid)
-		e.waiting = append([]core.GID{gid}, e.waiting...)
-		rg.state = core.StatusWaiting
-		e.emit(core.EvPause, gid)
-		e.log.Info("download paused", "gid", gid, "force", force)
 
 	case core.StatusWaiting:
 		rg.pauseReq = true
 		// aria2 keeps the group in the reserved queue with pauseRequested;
 		// state remains STATUS_WAITING + pauseRequested.
-		e.emit(core.EvPause, gid)
-		e.log.Info("download paused", "gid", gid)
+		e.log.Info("download pause requested", "gid", gid)
 
 	case core.StatusComplete, core.StatusError, core.StatusRemoved:
 		return fmt.Errorf("engine: cannot pause download GID#%s in state %s", gid, rg.state)
 	}
 
+	select {
+	case e.queueWake <- struct{}{}:
+	default:
+	}
+
 	return nil
 }
 
-// Resume restarts a paused download, clearing the pause flag and leaving it
-// in the waiting queue. The queue manager will promote it to active when a
-// slot becomes available (matching aria2's resume -> waiting -> active flow).
+// Resume restarts a paused download after it has reached the waiting queue.
+// The queue manager will promote it to active when a slot becomes available,
+// matching aria2's unpause -> waiting -> active flow.
 func (e *Engine) Resume(gid core.GID) error {
 	rg, ok := e.groups.getLocked(gid)
 	if !ok {
@@ -1076,51 +1375,73 @@ func (e *Engine) Resume(gid core.GID) error {
 	}
 	defer e.groups.unlock(gid)
 
-	if !rg.pauseReq {
+	if rg.state != core.StatusWaiting || !rg.pauseReq {
 		return fmt.Errorf("engine: download GID#%s is not paused (state=%s)", gid, rg.state)
 	}
 
 	rg.pauseReq = false
-	rg.restartReq = true
 	// Download is already in waiting queue (aria2 places paused groups
 	// in reservedGroups_ which is the waiting queue). State stays Waiting.
 	e.log.Info("download resumed", "gid", gid)
+	select {
+	case e.queueWake <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
 // Remove removes a download. Active downloads are force-halted first.
-// The download's final state is moved to the stopped/results queue.
+// Waiting downloads are dropped from the reserved queue without producing a
+// stopped result, matching aria2's removeReservedGroup path.
 //
 // If force is true, the removal is immediate even if the download is
 // mid-transfer.
 func (e *Engine) Remove(gid core.GID, force bool) error {
+	e.queuesMu.Lock()
 	rg, ok := e.groups.getLocked(gid)
 	if !ok {
+		e.queuesMu.Unlock()
 		return fmt.Errorf("engine: download GID#%s not found", gid)
 	}
 
-	if rg.state == core.StatusActive {
-		rg.forceHaltReq = true
-		if force {
-			rg.pauseReq = true
+	rg.haltRequested = true
+	rg.forceHaltReq = force
+	rg.haltReason = haltReasonUserRequest
+
+	switch rg.state {
+	case core.StatusActive:
+		rg.pauseReq = false
+		rg.restartReq = false
+		if rg.cancel == nil {
+			e.moveFromActiveLocked(gid)
+			e.queuesMu.Unlock()
+			e.addStoppedLocked(rg, core.StatusRemoved, core.ExitRemoved, "")
+			e.groups.deleteLocked(gid)
+			e.groups.unlock(gid)
+			e.log.Info("download removed", "gid", gid, "force", force)
+			return nil
 		}
-		if rg.cancel != nil {
-			rg.cancel()
-		}
-		e.queuesMu.Lock()
-		e.moveFromActiveLocked(gid)
+		rg.cancel()
+		e.groups.unlock(gid)
 		e.queuesMu.Unlock()
-	} else if rg.state == core.StatusWaiting {
-		e.queuesMu.Lock()
+		e.log.Info("download remove requested", "gid", gid, "force", force)
+		return nil
+	case core.StatusWaiting:
 		e.moveFromWaitingLocked(gid)
 		e.queuesMu.Unlock()
+		e.groups.deleteLocked(gid)
+		e.groups.unlock(gid)
+		e.log.Info("download removed", "gid", gid, "force", force)
+		return nil
+	case core.StatusComplete, core.StatusError, core.StatusRemoved:
+		e.queuesMu.Unlock()
+		e.groups.unlock(gid)
+		return fmt.Errorf("engine: cannot remove download GID#%s in state %s", gid, rg.state)
+	default:
+		e.queuesMu.Unlock()
+		e.groups.unlock(gid)
+		return fmt.Errorf("engine: cannot remove download GID#%s in state %s", gid, rg.state)
 	}
-
-	e.addStoppedLocked(rg, core.StatusRemoved, core.ExitRemoved, "removed by user")
-	e.groups.unlock(gid)
-	e.groups.delete(gid)
-	e.log.Info("download removed", "gid", gid, "force", force)
-	return nil
 }
 
 // PurgeDownloadResult clears the stopped/results queue and returns the
@@ -1177,6 +1498,8 @@ func (e *Engine) GetDownloadStat() (completed, errors, inProgress, waiting int) 
 		switch dr.errCode {
 		case core.ExitSuccess:
 			completed++
+		case core.ExitInProgress:
+			inProgress++
 		case core.ExitRemoved:
 			// removed — don't count
 		default:
@@ -1212,10 +1535,19 @@ func (e *Engine) ExitCode() core.ErrorCode {
 	e.stoppedRing.mu.Unlock()
 
 	if errorsCount == 0 && inProgress == 0 && waiting == 0 {
+		if e.shuttingDown.Load() && e.shutdownHadActive.Load() {
+			shutdownLastErr := core.ErrorCode(e.shutdownExitLastErr.Load())
+			if shutdownLastErr != core.ExitSuccess {
+				return shutdownLastErr
+			}
+			if e.shutdownExitPending.Load() {
+				return core.ExitUnfinishedDownloads
+			}
+		}
 		return core.ExitSuccess
 	}
 	if lastErr == core.ExitSuccess && inProgress > 0 {
-		return core.ExitInProgress
+		return core.ExitUnfinishedDownloads
 	}
 	if lastErr != core.ExitSuccess {
 		return lastErr
@@ -1225,24 +1557,19 @@ func (e *Engine) ExitCode() core.ErrorCode {
 
 // TellStatus returns the current status of a single download.
 func (e *Engine) TellStatus(gid core.GID) (*Status, error) {
-	rg, ok := e.groups.get(gid)
+	rg, ok := e.groups.getLocked(gid)
 	if ok {
-		return e.makeStatus(rg), nil
+		status := e.makeStatus(rg)
+		e.groups.unlock(gid)
+		return status, nil
 	}
 
 	dr, found := e.stoppedRing.getByGID(gid)
 	if !found {
 		return nil, fmt.Errorf("engine: download GID#%s not found", gid)
 	}
-	return &Status{
-		GID:          gid,
-		Status:       dr.state,
-		ErrorCode:    dr.errCode,
-		ErrorMessage: dr.errMsg,
-		BelongsTo:    dr.belongsTo,
-		Following:    dr.following,
-		FollowedBy:   dr.followedBy,
-	}, nil
+	status := cloneStatusSnapshot(dr.statusSnapshot)
+	return &status, nil
 }
 
 // TellActive returns status snapshots of all active downloads.
@@ -1317,11 +1644,13 @@ func (e *Engine) ChangeOption(gid core.GID, opts *config.Options) error {
 	}
 	defer e.groups.unlock(gid)
 
+	rg.localOpts = config.Merge(rg.localOpts, opts)
 	if rg.state == core.StatusActive {
 		if rg.pendingOpts == nil {
 			rg.pendingOpts = &config.Options{}
 		}
 		rg.pendingOpts = config.Merge(rg.pendingOpts, opts)
+		e.applyRequestGroupRuntimeOptionPatch(rg, opts)
 		rg.restartReq = true
 		rg.pauseReq = true
 		if rg.cancel != nil {
@@ -1329,6 +1658,9 @@ func (e *Engine) ChangeOption(gid core.GID, opts *config.Options) error {
 		}
 	} else {
 		rg.opts = config.Merge(rg.opts, opts)
+		if err := e.applyRequestGroupRuntimeOptions(rg, rg.opts); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1355,18 +1687,18 @@ func (e *Engine) GetOption(gid core.GID) (*config.Options, error) {
 // one of "POS_SET", "POS_CUR", or "POS_END". Returns the new absolute
 // position (0-indexed) matching aria2's ChangePositionRpcMethod.
 func (e *Engine) ChangePosition(gid core.GID, pos int, how string) (int64, error) {
+	e.queuesMu.Lock()
 	rg, ok := e.groups.getLocked(gid)
 	if !ok {
+		e.queuesMu.Unlock()
 		return 0, fmt.Errorf("engine: download GID#%s not found", gid)
 	}
-	defer e.groups.unlock(gid)
 
 	if rg.state != core.StatusWaiting {
+		e.groups.unlock(gid)
+		e.queuesMu.Unlock()
 		return 0, fmt.Errorf("engine: download GID#%s is not in waiting state", gid)
 	}
-
-	e.queuesMu.Lock()
-	defer e.queuesMu.Unlock()
 
 	n := len(e.waiting)
 	curIdx := -1
@@ -1377,6 +1709,8 @@ func (e *Engine) ChangePosition(gid core.GID, pos int, how string) (int64, error
 		}
 	}
 	if curIdx < 0 {
+		e.groups.unlock(gid)
+		e.queuesMu.Unlock()
 		return 0, fmt.Errorf("engine: download GID#%s not found in waiting queue", gid)
 	}
 
@@ -1389,6 +1723,8 @@ func (e *Engine) ChangePosition(gid core.GID, pos int, how string) (int64, error
 	case "POS_END":
 		dest = n + pos // pos is typically negative for POS_END
 	default:
+		e.groups.unlock(gid)
+		e.queuesMu.Unlock()
 		return 0, fmt.Errorf("engine: invalid how parameter: %q", how)
 	}
 	if dest < 0 {
@@ -1408,6 +1744,8 @@ func (e *Engine) ChangePosition(gid core.GID, pos int, how string) (int64, error
 	copy(e.waiting[dest+1:], e.waiting[dest:])
 	e.waiting[dest] = gid
 
+	e.groups.unlock(gid)
+	e.queuesMu.Unlock()
 	return int64(dest), nil
 }
 
@@ -1490,9 +1828,43 @@ func (e *Engine) ChangeGlobalOption(opts *config.Options) error {
 		return fmt.Errorf("engine: options is nil")
 	}
 
+	explicit := optionExplicitSet(opts)
+
 	e.queuesMu.Lock()
 	e.cfg = config.Merge(e.cfg, opts)
+	if optionChangeRequested(explicit, "auto-save-interval", opts.AutoSaveInterval != "") {
+		e.saveInterval = time.Duration(parseInt(e.cfg.AutoSaveInterval)) * time.Second
+		if e.saveInterval <= 0 {
+			e.saveInterval = 0
+		}
+	}
+	if optionChangeRequested(explicit, "save-session-interval", opts.SaveSessionInterval != "") {
+		e.saveSessionInterval = time.Duration(parseInt(e.cfg.SaveSessionInterval)) * time.Second
+		if e.saveSessionInterval <= 0 {
+			e.saveSessionInterval = 0
+		}
+	}
 	e.queuesMu.Unlock()
+
+	if optionChangeRequested(explicit, "max-overall-download-limit", opts.MaxOverallDownloadLimit != "") {
+		e.rateGlobal.SetRate(parseSize(e.cfg.MaxOverallDownloadLimit))
+	}
+	if optionChangeRequested(explicit, "max-overall-upload-limit", opts.MaxOverallUploadLimit != "") {
+		e.rateGlobalUp.SetRate(parseSize(e.cfg.MaxOverallUploadLimit))
+	}
+	if optionChangeRequested(explicit, "max-download-result", opts.MaxDownloadResult != 0) {
+		e.stoppedRing.resize(e.cfg.MaxDownloadResult)
+		_, errors, lastErr := e.stoppedRing.evictionInfo()
+		e.removedErrors.Store(int64(errors))
+		e.removedLastErr.Store(int64(lastErr))
+	}
+	if optionChangeRequested(explicit, "max-concurrent-downloads", opts.MaxConcurrentDownloads != 0) ||
+		optionChangeRequested(explicit, "optimize-concurrent-downloads", opts.OptimizeConcurrentDownloads != "") {
+		select {
+		case e.queueWake <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -1502,6 +1874,37 @@ func (e *Engine) GetGlobalOption() *config.Options {
 	defer e.queuesMu.Unlock()
 	cp := *e.cfg
 	return &cp
+}
+
+func optionExplicitSet(opts *config.Options) map[string]bool {
+	names := opts.ExplicitNames()
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+func optionChangeRequested(explicit map[string]bool, name string, fallback bool) bool {
+	if explicit != nil {
+		return explicit[name]
+	}
+	return fallback
+}
+
+func (e *Engine) GetPeers(gid core.GID) ([]PeerStatus, error) {
+	rg, ok := e.groups.get(gid)
+	if !ok {
+		return nil, fmt.Errorf("engine: download GID#%s not found", gid)
+	}
+	swarm := rg.btSwarm.Load()
+	if swarm == nil {
+		return []PeerStatus{}, nil
+	}
+	return swarm.snapshotPeers(), nil
 }
 
 // SaveSession serializes the current engine state (all active and waiting
@@ -1514,34 +1917,7 @@ func (e *Engine) SaveSession() error {
 		return fmt.Errorf("engine: Filename is not given.")
 	}
 
-	e.queuesMu.Lock()
-	waitingCopy := make([]core.GID, len(e.waiting))
-	copy(waitingCopy, e.waiting)
-	activeCopy := make([]core.GID, len(e.active))
-	copy(activeCopy, e.active)
-	e.queuesMu.Unlock()
-
-	var entries []sessionfile.Entry
-	for _, gid := range waitingCopy {
-		rg, ok := e.groups.getLocked(gid)
-		if !ok {
-			continue
-		}
-		entries = append(entries, e.toSessionEntry(rg))
-		e.groups.unlock(gid)
-	}
-	for _, gid := range activeCopy {
-		rg, ok := e.groups.getLocked(gid)
-		if !ok {
-			continue
-		}
-		entries = append(entries, e.toSessionEntry(rg))
-		e.groups.unlock(gid)
-	}
-
-	if len(entries) == 0 {
-		return nil
-	}
+	entries := e.sessionEntriesForSave()
 
 	hash, err := sessionfile.SerializedHash(entries)
 	if err != nil {
@@ -1550,7 +1926,10 @@ func (e *Engine) SaveSession() error {
 	e.queuesMu.Lock()
 	if e.hasSessionHash && e.lastSessionHash == hash {
 		e.queuesMu.Unlock()
-		return nil
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		e.queuesMu.Lock()
 	}
 	e.lastSessionHash = hash
 	e.hasSessionHash = true
@@ -1559,25 +1938,57 @@ func (e *Engine) SaveSession() error {
 	return sessionfile.AtomicSave(path, entries, false)
 }
 
+func (e *Engine) sessionEntriesForSave() []sessionfile.Entry {
+	e.queuesMu.Lock()
+	waitingCopy := append([]core.GID(nil), e.waiting...)
+	activeCopy := append([]core.GID(nil), e.active...)
+	shutdownCopy := append([]sessionfile.Entry(nil), e.shutdownSession...)
+	useShutdownSnapshot := e.shuttingDown.Load() && len(waitingCopy) == 0 && len(activeCopy) == 0 && len(shutdownCopy) > 0
+	e.queuesMu.Unlock()
+
+	if useShutdownSnapshot {
+		return shutdownCopy
+	}
+	return e.sessionEntriesFromQueues(activeCopy, waitingCopy)
+}
+
+func (e *Engine) sessionEntriesFromQueues(activeCopy, waitingCopy []core.GID) []sessionfile.Entry {
+	entries := make([]sessionfile.Entry, 0, len(waitingCopy)+len(activeCopy))
+	for _, gid := range activeCopy {
+		rg, ok := e.groups.getLocked(gid)
+		if !ok {
+			continue
+		}
+		entries = append(entries, e.toSessionEntry(rg))
+		e.groups.unlock(gid)
+	}
+	for _, gid := range waitingCopy {
+		rg, ok := e.groups.getLocked(gid)
+		if !ok {
+			continue
+		}
+		entries = append(entries, e.toSessionEntry(rg))
+		e.groups.unlock(gid)
+	}
+	return entries
+}
+
 func (e *Engine) toSessionEntry(rg *requestGroup) sessionfile.Entry {
+	uris := append([]string(nil), rg.uris...)
+	if (len(rg.torrent) > 0 || len(rg.metalinkData) > 0) && rg.metadataURI == "" {
+		uris = nil
+	} else if rg.metadataURI != "" {
+		uris = []string{rg.metadataURI}
+	}
 	entry := sessionfile.Entry{
-		URIs: rg.uris,
-		GID:  rg.gid,
-		Options: map[string]string{
-			"gid": rg.gid.Hex(),
-		},
+		URIs:    uris,
+		GID:     rg.gid,
+		Options: config.SessionOptionMap(rg.localOpts),
 	}
 	if rg.pauseReq {
-		entry.Options["pause"] = "true"
 		entry.Status = core.StatusPaused
 	} else {
 		entry.Status = core.StatusWaiting
-	}
-	if rg.opts != nil && rg.opts.Dir != "" {
-		entry.Options["dir"] = rg.opts.Dir
-	}
-	if rg.opts != nil && rg.opts.Out != "" {
-		entry.Options["out"] = rg.opts.Out
 	}
 	return entry
 }
@@ -1586,21 +1997,24 @@ func (e *Engine) toSessionEntry(rg *requestGroup) sessionfile.Entry {
 // Each entry in the session file is added to the engine as a waiting download.
 // Entries with the pause flag set are added in paused state.
 func (e *Engine) LoadSession(path string) error {
-	f, err := os.Open(path)
+	parser, err := sessionfile.OpenParser(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("engine: load session: %w", err)
 	}
-	defer f.Close()
+	defer parser.Close()
 
-	entries, err := sessionfile.Read(f)
-	if err != nil {
-		return fmt.Errorf("engine: load session: %w", err)
-	}
-
-	for _, entry := range entries {
+	loaded := 0
+	for {
+		entry, ok, err := parser.Next()
+		if err != nil {
+			return fmt.Errorf("engine: load session: %w", err)
+		}
+		if !ok {
+			break
+		}
 		if len(entry.URIs) == 0 {
 			continue
 		}
@@ -1609,38 +2023,36 @@ func (e *Engine) LoadSession(path string) error {
 			e.log.Warn("session load: failed to parse entry options", "gid", entry.GID, "error", optErr)
 			continue
 		}
-		spec := AddSpec{
-			URIs:    entry.URIs,
-			Options: opts,
-		}
-		gid, err := e.Add(spec)
-		if err != nil {
-			e.log.Warn("session load: failed to add entry", "gid", entry.GID, "error", err)
+		added, addErr := e.addURIEntry(entry.URIs, opts)
+		if addErr != nil {
+			e.log.Warn("session load: failed to add entry", "gid", entry.GID, "error", addErr)
 			continue
 		}
-		e.log.Debug("session load: restored download", "gid", gid)
+		loaded += added
 	}
 
-	e.log.Info("session loaded", "entries", len(entries))
+	e.log.Info("session loaded", "entries", loaded)
 	return nil
 }
 
 // loadInputFile reads aria2 input/session entries and adds them to the engine.
 // Option lines following each URI entry are parsed with the normal config parser.
 func (e *Engine) loadInputFile(path string) error {
-	f, err := openInputFile(path)
+	parser, err := sessionfile.OpenParser(path)
 	if err != nil {
 		return fmt.Errorf("engine: input file: %w", err)
 	}
-	defer f.Close()
-
-	entries, err := sessionfile.Read(f)
-	if err != nil {
-		return fmt.Errorf("engine: input file read: %w", err)
-	}
+	defer parser.Close()
 
 	loaded := 0
-	for _, entry := range entries {
+	for {
+		entry, ok, err := parser.Next()
+		if err != nil {
+			return fmt.Errorf("engine: input file read: %w", err)
+		}
+		if !ok {
+			break
+		}
 		if len(entry.URIs) == 0 {
 			continue
 		}
@@ -1659,13 +2071,6 @@ func (e *Engine) loadInputFile(path string) error {
 	return nil
 }
 
-func openInputFile(path string) (io.ReadCloser, error) {
-	if path == "-" {
-		return io.NopCloser(os.Stdin), nil
-	}
-	return os.Open(path)
-}
-
 func (e *Engine) addURIEntry(uris []string, opts *config.Options) (int, error) {
 	effective := config.Merge(e.cfg, opts)
 	if effective.ParameterizedURI {
@@ -1679,17 +2084,129 @@ func (e *Engine) addURIEntry(uris []string, opts *config.Options) (int, error) {
 		return 0, nil
 	}
 	if effective.ForceSequential {
+		added := 0
 		for _, uri := range uris {
-			if _, err := e.Add(AddSpec{URIs: []string{uri}, Options: opts}); err != nil {
+			ok, err := e.addInputSource(uri, opts)
+			if err != nil {
 				return 0, err
 			}
+			if ok {
+				added++
+			}
 		}
-		return len(uris), nil
+		return added, nil
 	}
-	if _, err := e.Add(AddSpec{URIs: uris, Options: opts}); err != nil {
-		return 0, err
+
+	streamURIs := make([]string, 0, len(uris))
+	added := 0
+	for _, uri := range uris {
+		if isStreamURI(uri) {
+			streamURIs = append(streamURIs, uri)
+			continue
+		}
+		ok, err := e.addInputSource(uri, opts)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			added++
+		}
 	}
-	return 1, nil
+
+	if len(streamURIs) > 0 {
+		if _, err := e.Add(AddSpec{URIs: streamURIs, Options: opts}); err != nil {
+			return 0, err
+		}
+		added++
+	}
+	return added, nil
+}
+
+func (e *Engine) addInputSource(source string, opts *config.Options) (bool, error) {
+	switch {
+	case guessLocalTorrentFile(source):
+		data, err := os.ReadFile(source)
+		if err != nil {
+			e.log.Warn("input source: cannot read torrent file", "path", source, "error", err)
+			return false, nil
+		}
+		if _, err := torrent.Load(data); err != nil {
+			e.log.Warn("input source: cannot parse torrent file", "path", source, "error", err)
+			return false, nil
+		}
+		if _, err := e.Add(AddSpec{Torrent: data, Options: opts, MetadataURI: source}); err != nil {
+			return false, err
+		}
+		return true, nil
+	case guessLocalMetalinkFile(source):
+		data, err := os.ReadFile(source)
+		if err != nil {
+			e.log.Warn("input source: cannot read metalink file", "path", source, "error", err)
+			return false, nil
+		}
+		if _, err := metalink.Parse(bytes.NewReader(data)); err != nil {
+			e.log.Warn("input source: cannot parse metalink file", "path", source, "error", err)
+			return false, nil
+		}
+		if _, err := e.Add(AddSpec{Metalink: data, Options: opts, MetadataURI: source}); err != nil {
+			return false, err
+		}
+		return true, nil
+	default:
+		if !isAddableURI(source) {
+			e.log.Warn("input source: unrecognized URI", "value", source)
+			return false, nil
+		}
+		if _, err := e.Add(AddSpec{URIs: []string{source}, Options: opts}); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+}
+
+func isStreamURI(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || u.Scheme == "" {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "ftp", "sftp":
+		return u.Host != ""
+	default:
+		return false
+	}
+}
+
+func isAddableURI(raw string) bool {
+	if isStreamURI(raw) {
+		return true
+	}
+	if _, err := magnet.Parse(raw); err == nil {
+		return true
+	}
+	return false
+}
+
+func guessLocalTorrentFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var head [1]byte
+	n, err := f.Read(head[:])
+	return err == nil && n == 1 && head[0] == 'd'
+}
+
+func guessLocalMetalinkFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var head [5]byte
+	n, err := f.Read(head[:])
+	return err == nil && n == len(head) && string(head[:]) == "<?xml"
 }
 
 func optionsFromSessionEntry(entry sessionfile.Entry) (*config.Options, error) {
@@ -1773,7 +2290,7 @@ func (e *Engine) ticker() {
 		case <-t.C:
 			e.refreshStats()
 
-			if e.console != nil && !e.cfg.Quiet && e.cfg.ShowConsoleReadout {
+			if e.console != nil && !e.cfg.Quiet && (e.cfg.ShowConsoleReadout || parseInt(e.cfg.SummaryInterval) > 0) {
 				e.console.Render(e.collectDownloadStats())
 			}
 
@@ -2013,6 +2530,17 @@ func (e *Engine) setControlAdaptor(rg *requestGroup, adaptor disk.Adaptor) {
 	rg.controlMu.Unlock()
 }
 
+func (e *Engine) addBTUploadLength(rg *requestGroup, delta int64) {
+	if delta <= 0 {
+		return
+	}
+	rg.controlMu.Lock()
+	if rg.controlInfo != nil {
+		rg.controlInfo.UploadLength += delta
+	}
+	rg.controlMu.Unlock()
+}
+
 func (e *Engine) syncControlAdaptor(rg *requestGroup) {
 	rg.controlMu.Lock()
 	adaptor := rg.adaptor
@@ -2075,22 +2603,22 @@ func (e *Engine) applyControlBitfield(rg *requestGroup, adaptor disk.Adaptor) {
 	}
 }
 
-func (e *Engine) markControlWritten(rg *requestGroup, start, length int64) {
+func (e *Engine) markControlWritten(rg *requestGroup, start, length int64) []int {
 	if length <= 0 {
-		return
+		return nil
 	}
 	rg.controlMu.Lock()
 	defer rg.controlMu.Unlock()
 	info := rg.controlInfo
 	if info == nil || info.PieceLength <= 0 || info.TotalLength <= 0 {
-		return
+		return nil
 	}
 	end := start + length
 	if end > info.TotalLength {
 		end = info.TotalLength
 	}
 	if start < 0 || start >= end {
-		return
+		return nil
 	}
 	pieces := controlNumPieces(info.TotalLength, info.PieceLength)
 	if len(rg.controlPieceBytes) != pieces {
@@ -2098,6 +2626,7 @@ func (e *Engine) markControlWritten(rg *requestGroup, start, length int64) {
 	}
 	first := int(start / info.PieceLength)
 	last := int((end - 1) / info.PieceLength)
+	var completed []int
 	for i := first; i <= last && i < pieces; i++ {
 		if controlBit(info.Bitfield, i) {
 			continue
@@ -2113,8 +2642,10 @@ func (e *Engine) markControlWritten(rg *requestGroup, start, length int64) {
 		if rg.controlPieceBytes[i] >= pieceEnd-pieceStart {
 			rg.controlPieceBytes[i] = pieceEnd - pieceStart
 			setControlBit(info.Bitfield, i, true)
+			completed = append(completed, i)
 		}
 	}
+	return completed
 }
 
 func (e *Engine) markControlPiece(rg *requestGroup, index int, ok bool) {
@@ -2328,18 +2859,24 @@ func (e *Engine) collectDownloadStats() []console.DownloadStat {
 		if len(s.Files) > 0 {
 			fn = filepath.Base(s.Files[0].Path)
 		}
+		sessionUploaded := int64(0)
+		if rg, ok := e.groups.get(s.GID); ok {
+			sessionUploaded = rg.sessionUploaded
+		}
 		snapshots = append(snapshots, console.DownloadStat{
-			GID:           s.GID.Hex(),
-			Status:        s.Status.String(),
-			TotalSize:     s.TotalLength,
-			CompletedSize: s.CompletedLength,
-			Speed:         s.DownloadSpeed,
-			UploadSpeed:   s.UploadSpeed,
-			Connections:   s.Connections,
-			ErrorCode:     int(s.ErrorCode),
-			NumSeeders:    int(s.NumSeeders),
-			Filename:      fn,
-			Seeder:        s.Seeder,
+			GID:                 s.GID.Hex(),
+			Status:              s.Status.String(),
+			TotalSize:           s.TotalLength,
+			CompletedSize:       s.CompletedLength,
+			Speed:               s.DownloadSpeed,
+			UploadSpeed:         s.UploadSpeed,
+			AllTimeUploadLength: s.UploadLength,
+			SessionUploadLength: sessionUploaded,
+			Connections:         s.Connections,
+			ErrorCode:           int(s.ErrorCode),
+			NumSeeders:          int(s.NumSeeders),
+			Filename:            fn,
+			Seeder:              s.Seeder,
 		})
 	}
 	return snapshots
@@ -2515,6 +3052,9 @@ func (e *Engine) cancelIfIdle() {
 	e.queuesMu.Lock()
 	isEmpty := len(e.active) == 0 && len(e.waiting) == 0
 	e.queuesMu.Unlock()
+	if isEmpty && e.inputParser != nil {
+		return
+	}
 	if isEmpty && !e.keepRunning && e.cancel != nil {
 		e.cancel()
 	}
@@ -2564,30 +3104,42 @@ func (e *Engine) removeStoppedGroup() {
 		e.moveFromActiveLocked(gid)
 
 		if rg.pauseReq {
-			if !rg.restartReq {
-				e.log.Info("download paused", "gid", gid)
-				e.runHookByName(rg, 1, "on-download-pause")
-			}
 			rg.state = core.StatusWaiting
 			e.waiting = append([]core.GID{gid}, e.waiting...)
 
 			if rg.pendingOpts != nil {
 				rg.opts = config.Merge(rg.opts, rg.pendingOpts)
+				_ = e.applyRequestGroupRuntimeOptions(rg, rg.opts)
 				rg.pendingOpts = nil
 			}
 
 			if rg.restartReq {
 				rg.pauseReq = false
+			} else {
+				e.log.Info("download paused", "gid", gid)
+				e.runHookByName(rg, 1, "on-download-pause")
+				e.emit(core.EvPause, gid)
 			}
 
 			rg.restartReq = false
 			rg.forceHaltReq = false
+			rg.haltRequested = false
+			rg.haltReason = haltReasonNone
 		} else if rg.haltRequested {
-			errCode := core.ExitRemoved
-			if rg.errCode != 0 {
-				errCode = rg.errCode
+			switch rg.haltReason {
+			case haltReasonUserRequest:
+				e.addStoppedLocked(rg, core.StatusRemoved, core.ExitRemoved, "")
+			default:
+				errCode := core.ExitInProgress
+				if rg.errCode != 0 && rg.errCode != core.ExitSuccess {
+					errCode = rg.errCode
+				}
+				errMsg := rg.errMsg
+				if errCode == core.ExitInProgress {
+					errMsg = ""
+				}
+				e.addStoppedLocked(rg, core.StatusError, errCode, errMsg)
 			}
-			e.addStoppedLocked(rg, core.StatusError, errCode, rg.errMsg)
 			e.groups.unlock(gid)
 			e.groups.delete(gid)
 			continue
@@ -2617,80 +3169,129 @@ func (e *Engine) removeStoppedGroup() {
 // Matches aria2's RequestGroupMan::fillRequestGroupFromReserver
 // (RequestGroupMan.cc:515-593).
 func (e *Engine) fillRequestGroupFromReserver() {
-	e.queuesMu.Lock()
+	for {
+		e.queuesMu.Lock()
 
-	max := e.cfg.MaxConcurrentDownloads
-	if max <= 0 {
-		max = 1
-	}
+		max := e.cfg.MaxConcurrentDownloads
+		if max <= 0 {
+			max = 1
+		}
 
-	if len(e.active) >= max {
-		e.queuesMu.Unlock()
-		return
-	}
+		if len(e.active) >= max {
+			e.queuesMu.Unlock()
+			return
+		}
 
-	num := max - len(e.active)
-	promoted := 0
-	var pending []core.GID
-	var promotedGIDs []core.GID
-
-	// Pre-allocate event slice for batching.
-	batchSize := num
-	if batchSize < 1 {
-		batchSize = 1
-	}
-	startEvents := make([]core.Event, 0, batchSize)
-
-	for promoted < num && len(e.waiting) > 0 {
-		gid := e.waiting[0]
-		e.waiting = e.waiting[1:]
-
-		rg, ok := e.groups.getLocked(gid)
-		if !ok {
+		if len(e.waiting) == 0 && e.inputParser != nil {
+			e.queuesMu.Unlock()
+			added, err := e.loadNextDeferredInputEntry()
+			if err != nil {
+				e.log.Warn("deferred input load failed", "error", err)
+			}
+			if added == 0 {
+				return
+			}
 			continue
 		}
 
-		if rg.pauseReq {
-			pending = append(pending, gid)
+		num := max - len(e.active)
+		promoted := 0
+		var pending []core.GID
+		var promotedGIDs []core.GID
+
+		batchSize := num
+		if batchSize < 1 {
+			batchSize = 1
+		}
+		startEvents := make([]core.Event, 0, batchSize)
+
+		for promoted < num && len(e.waiting) > 0 {
+			gid := e.waiting[0]
+			e.waiting = e.waiting[1:]
+
+			rg, ok := e.groups.getLocked(gid)
+			if !ok {
+				continue
+			}
+
+			if rg.pauseReq {
+				pending = append(pending, gid)
+				e.groups.unlock(gid)
+				continue
+			}
+
+			rg.state = core.StatusActive
+			e.active = append(e.active, gid)
+			promoted++
+			promotedGIDs = append(promotedGIDs, gid)
+			startEvents = append(startEvents, core.Event{
+				Kind: core.EvStart,
+				GID:  gid,
+				Time: time.Now(),
+			})
+			e.log.Info("download started", "gid", gid)
 			e.groups.unlock(gid)
-			continue
 		}
 
-		rg.state = core.StatusActive
-		e.active = append(e.active, gid)
-		promoted++
-		promotedGIDs = append(promotedGIDs, gid)
-		startEvents = append(startEvents, core.Event{
-			Kind: core.EvStart,
-			GID:  gid,
-			Time: time.Now(),
-		})
-		e.log.Info("download started", "gid", gid)
-		e.groups.unlock(gid)
-	}
+		if len(pending) > 0 {
+			e.waiting = append(pending, e.waiting...)
+		}
 
-	if len(pending) > 0 {
-		e.waiting = append(pending, e.waiting...)
-	}
+		e.emitBatch(startEvents)
+		e.queuesMu.Unlock()
 
-	e.emitBatch(startEvents)
-	e.queuesMu.Unlock()
+		if !e.running.Load() {
+			return
+		}
 
-	if !e.running.Load() {
+		for _, gid := range promotedGIDs {
+			rg, ok := e.groups.getLocked(gid)
+			if !ok {
+				continue
+			}
+			e.runHookByName(rg, 1, "on-download-start")
+			rg.ctx, rg.cancel = context.WithCancel(e.ctx)
+			e.wg.Add(1)
+			go e.runDownload(rg)
+			e.groups.unlock(gid)
+		}
 		return
 	}
+}
 
-	for _, gid := range promotedGIDs {
-		rg, ok := e.groups.getLocked(gid)
+func (e *Engine) loadNextDeferredInputEntry() (int, error) {
+	for e.inputParser != nil {
+		entry, ok, err := e.inputParser.Next()
+		if err != nil {
+			_ = e.inputParser.Close()
+			e.inputParser = nil
+			return 0, fmt.Errorf("engine: deferred input read: %w", err)
+		}
 		if !ok {
+			_ = e.inputParser.Close()
+			e.inputParser = nil
+			return 0, nil
+		}
+		if len(entry.URIs) == 0 {
 			continue
 		}
-		e.runHookByName(rg, 1, "on-download-start")
-		rg.ctx, rg.cancel = context.WithCancel(e.ctx)
-		e.wg.Add(1)
-		go e.runDownload(rg)
-		e.groups.unlock(gid)
+		opts, optErr := optionsFromSessionEntry(entry)
+		if optErr != nil {
+			_ = e.inputParser.Close()
+			e.inputParser = nil
+			return 0, fmt.Errorf("engine: deferred input options: %w", optErr)
+		}
+		added, addErr := e.addURIEntry(entry.URIs, opts)
+		if addErr != nil {
+			_ = e.inputParser.Close()
+			e.inputParser = nil
+			return 0, fmt.Errorf("engine: deferred input add: %w", addErr)
+		}
+		if added > 0 {
+			return added, nil
+		}
 	}
+	return 0, nil
 }
 
 // onEndOfRun performs cleanup when the engine stops, matching aria2's
@@ -2708,6 +3309,14 @@ func (e *Engine) onEndOfRun() {
 	copy(waitingCopy, e.waiting)
 	e.queuesMu.Unlock()
 
+	shutdownEntries := e.sessionEntriesFromQueues(activeCopy, waitingCopy)
+	e.queuesMu.Lock()
+	e.shutdownSession = append(e.shutdownSession[:0], shutdownEntries...)
+	e.queuesMu.Unlock()
+	e.shutdownHadActive.Store(len(activeCopy) > 0)
+	e.shutdownExitPending.Store(false)
+	e.shutdownExitLastErr.Store(int64(core.ExitSuccess))
+
 	for _, gid := range activeCopy {
 		rg, ok := e.groups.getLocked(gid)
 		if !ok {
@@ -2719,11 +3328,18 @@ func (e *Engine) onEndOfRun() {
 			e.queuesMu.Unlock()
 			// Graceful shutdown: mark as IN_PROGRESS so they can be
 			// resumed on restart (matches aria2's SHUTDOWN_SIGNAL halt reason).
-			errCode := core.ExitRemoved
+			errCode := core.ExitInProgress
 			if rg.errCode != 0 && rg.errCode != core.ExitSuccess {
 				errCode = rg.errCode
 			}
-			e.addStoppedLocked(rg, core.StatusError, errCode, "shutdown")
+			errMsg := rg.errMsg
+			if errCode == core.ExitInProgress {
+				errMsg = ""
+				e.shutdownExitPending.Store(true)
+			} else if errCode != core.ExitSuccess && errCode != core.ExitRemoved {
+				e.shutdownExitLastErr.Store(int64(errCode))
+			}
+			e.addStoppedLocked(rg, core.StatusError, errCode, errMsg)
 			e.groups.unlock(gid)
 			e.groups.delete(gid)
 			continue
@@ -2788,7 +3404,10 @@ func (e *Engine) addStoppedLocked(rg *requestGroup, state core.Status, errCode c
 	dr.following = rg.following
 	dr.followedBy = append(dr.followedBy[:0], rg.followedBy...)
 	dr.opts = config.Merge(rg.opts)
+	dr.localOpts = config.CloneExplicitOptions(rg.localOpts)
+	dr.metadataURI = rg.metadataURI
 	dr.filePath = resultFilePath(rg)
+	dr.statusSnapshot = e.makeStoppedStatus(rg, state, errCode, errMsg)
 	dr.totalLength = rg.totalLength
 	dr.completedLength = rg.completedLength
 	dr.sessionDownloadLength = rg.completedLength
@@ -2846,15 +3465,20 @@ func (e *Engine) addStoppedLocked(rg *requestGroup, state core.Status, errCode c
 	} else {
 		e.saveControlFile(rg)
 	}
+	stopThrottle(rg.downloadLimit)
+	stopThrottle(rg.uploadLimit)
+	rg.downloadLimit = nil
+	rg.uploadLimit = nil
 
-	// Emit appropriate event.
-	switch state {
-	case core.StatusComplete:
+	// Match aria2's stop-hook/event split: IN_PROGRESS and REMOVED are stop events,
+	// successful completion is complete, and the remaining error codes are errors.
+	switch errCode {
+	case core.ExitSuccess:
 		e.emit(core.EvComplete, rg.gid)
-	case core.StatusError:
-		e.emit(core.EvError, rg.gid)
-	case core.StatusRemoved:
+	case core.ExitInProgress, core.ExitRemoved:
 		e.emit(core.EvStop, rg.gid)
+	default:
+		e.emit(core.EvError, rg.gid)
 	}
 
 	e.runStopHook(rg, errCode)
@@ -2909,7 +3533,19 @@ func (e *Engine) runDownload(rg *requestGroup) {
 		return
 	}
 
+	selectedURIs := e.selectDownloadURIs(rg, 1)
 	uri := rg.uris[0]
+	if len(selectedURIs) > 0 {
+		uri = selectedURIs[0]
+	}
+	rg.uriUsed = true
+	host, _ := uriHostProto(uri)
+	rg.activeURI = uri
+	if host != "" {
+		rg.activeHosts = map[string]int{host: 1}
+	} else {
+		rg.activeHosts = nil
+	}
 	if strings.HasPrefix(uri, "magnet:?") {
 		e.runMagnetDownload(ctx, rg, uri)
 		rg.cancel()
@@ -3047,29 +3683,22 @@ func (e *Engine) runMagnetDownload(ctx context.Context, rg *requestGroup, uri st
 		rg.errMsg = "magnet link missing BitTorrent v1 info hash"
 		return
 	}
-	if !rg.opts.BTLoadSavedMetadata {
-		rg.errCode = core.ExitResourceNotFound
-		rg.errMsg = "magnet link metadata download not supported (local .torrent not found)"
-		return
-	}
-	dir := rg.opts.Dir
-	if dir == "" {
-		dir = "."
-	}
-	torrentPath := filepath.Join(dir, fmt.Sprintf("%x.torrent", m.InfoHashV1[:]))
-	torrentData, err := os.ReadFile(torrentPath)
+
+	loaded, err := e.tryLoadSavedMagnetTorrent(ctx, rg, m)
 	if err != nil {
-		if os.IsNotExist(err) {
-			rg.errCode = core.ExitResourceNotFound
-			rg.errMsg = "magnet link metadata download not supported (local .torrent not found)"
-			return
-		}
-		rg.errCode = core.ExitFileIOError
-		rg.errMsg = err.Error()
+		e.log.Error("magnet saved metadata load failed", "gid", rg.gid, "error", err)
+		rg.errCode = protocolErrorCode(err)
+		rg.errMsg = protocolErrorMessage(err)
 		return
 	}
-	if err := e.runBTDownload(ctx, rg, torrentData); err != nil {
-		e.log.Error("magnet local torrent download failed", "gid", rg.gid, "path", torrentPath, "error", err)
+	if loaded {
+		return
+	}
+
+	if err := e.runMagnetMetadataSession(ctx, rg, m); err != nil {
+		e.log.Error("magnet metadata download failed", "gid", rg.gid, "error", err)
+		rg.errCode = protocolErrorCode(err)
+		rg.errMsg = protocolErrorMessage(err)
 	}
 }
 
@@ -3091,10 +3720,16 @@ func (e *Engine) prepareHTTPMetadata(ctx context.Context, rg *requestGroup, uri,
 		rg.errMsg = err.Error()
 		return outPath, -1, true
 	}
+	if err := e.applyHTTPResponseDigests(rg, info.Digests); err != nil {
+		rg.errCode = core.ExitChecksumError
+		rg.errMsg = err.Error()
+		return outPath, -1, true
+	}
 
 	rg.probed = true
 	rg.probedSize = info.Size
 	rg.acceptsRanges = info.AcceptsRanges
+	rg.inflatedResponse = info.Inflated
 	rg.cdFilename = info.ContentDispositionFilename
 	rg.lastModified = info.LastModified
 
@@ -3104,77 +3739,138 @@ func (e *Engine) prepareHTTPMetadata(ctx context.Context, rg *requestGroup, uri,
 	return outPath, info.Size, false
 }
 
+type httpRetryState struct {
+	maxTries        int
+	retryWait       time.Duration
+	maxFileNotFound int
+	failures        int
+	fileNotFound    int
+}
+
+func newHTTPRetryState(opts *config.Options) httpRetryState {
+	if opts == nil {
+		return httpRetryState{}
+	}
+	return httpRetryState{
+		maxTries:        opts.MaxTries,
+		retryWait:       time.Duration(parseInt(opts.RetryWait)) * time.Second,
+		maxFileNotFound: opts.MaxFileNotFound,
+	}
+}
+
+func (e *Engine) shouldRetryHTTP(ctx context.Context, state *httpRetryState, err error) (bool, error) {
+	if state == nil || err == nil {
+		return false, err
+	}
+
+	statusCode := 0
+	var statusErr *httpproto.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		statusCode = statusErr.StatusCode()
+	}
+
+	shouldRetry := false
+	switch statusCode {
+	case http.StatusNotFound:
+		if state.maxFileNotFound == 0 {
+			return false, err
+		}
+		state.fileNotFound++
+		if state.fileNotFound >= state.maxFileNotFound {
+			return false, fmt.Errorf("http: max-file-not-found reached: %w",
+				core.NewError(core.ExitMaxFileNotFound, "max file not found"))
+		}
+		shouldRetry = true
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
+		shouldRetry = state.retryWait > 0
+	case http.StatusGatewayTimeout:
+		shouldRetry = true
+	}
+	if !shouldRetry {
+		return false, err
+	}
+
+	state.failures++
+	if state.maxTries > 0 && state.failures >= state.maxTries {
+		return false, err
+	}
+	if state.retryWait > 0 {
+		timer := time.NewTimer(state.retryWait)
+		defer func() {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	return true, nil
+}
+
 func (e *Engine) probeHTTPInfoWithRetry(ctx context.Context, rg *requestGroup, driver *httpproto.Driver, uri, outPath string) (httpproto.ResourceInfo, error) {
 	opts := e.httpRequestOptions(rg, outPath)
-	maxTries := rg.opts.MaxTries
-	retryWait := time.Duration(parseInt(rg.opts.RetryWait)) * time.Second
-	maxFileNotFound := rg.opts.MaxFileNotFound
-	fileNotFound := 0
-	failures := 0
+	retryState := newHTTPRetryState(rg.opts)
 
 	for {
 		info, err := driver.ProbeInfoWithOptions(ctx, uri, opts)
 		if err == nil || errors.Is(err, httpproto.ErrNotModified) {
 			return info, err
 		}
-
-		code := core.CodeFrom(err)
-		shouldRetry := false
-		switch code {
-		case core.ExitResourceNotFound:
-			if maxFileNotFound == 0 {
-				return info, err
-			}
-			fileNotFound++
-			if fileNotFound >= maxFileNotFound {
-				return info, fmt.Errorf("http: max-file-not-found reached: %w",
-					core.NewError(core.ExitMaxFileNotFound, "max file not found"))
-			}
-			shouldRetry = true
-		case core.ExitHTTPServiceUnavailable:
-			shouldRetry = retryWait > 0
+		retry, retryErr := e.shouldRetryHTTP(ctx, &retryState, err)
+		if retryErr != nil && !retry {
+			return info, retryErr
 		}
-		if !shouldRetry {
+		if !retry {
 			return info, err
-		}
-
-		failures++
-		if maxTries > 0 && failures >= maxTries {
-			return info, err
-		}
-		if retryWait > 0 {
-			timer := time.NewTimer(retryWait)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				return info, ctx.Err()
-			}
 		}
 	}
 }
 
 func (e *Engine) httpDriverForURI(rg *requestGroup, rawURI string) (*httpproto.Driver, error) {
+	acceptEncoding := ""
+	if opts := rgOptionsOrDefault(rg, e.cfg); opts.HTTPAcceptGzip {
+		acceptEncoding = "deflate, gzip"
+	}
+	return e.httpDriverForURIWithAcceptEncoding(rg, rawURI, acceptEncoding)
+}
+
+func (e *Engine) httpDriverForURIWithAcceptEncoding(rg *requestGroup, rawURI string, acceptEncoding string) (*httpproto.Driver, error) {
 	opts := e.cfg
 	if rg != nil && rg.opts != nil {
 		opts = rg.opts
 	}
 	proto := "http"
+	targetHost := ""
 	if u, err := url.Parse(rawURI); err == nil && u.Scheme != "" {
 		proto = strings.ToLower(u.Scheme)
-	}
-	dialer, err := e.dialerForProtocol(proto, opts)
-	if err != nil {
-		return nil, err
+		targetHost = u.Hostname()
 	}
 	httpTLS, err := httpClientTLSConfig(opts)
 	if err != nil {
 		return nil, err
+	}
+	proxyURI := resolveProxyURIForTarget(proto, targetHost, opts)
+	proxyMethod := resolveHTTPProxyMethod(proto, opts)
+	dialer, err := e.dialerForProtocol(proto, targetHost, opts)
+	if err != nil {
+		return nil, err
+	}
+	var transportProxyURL *url.URL
+	if proxyURI != "" && proto == "http" && proxyMethod == "get" {
+		transportProxyURL, err = url.Parse(proxyURI)
+		if err != nil {
+			return nil, err
+		}
+		dialer, err = netx.NewDialer(engineDialerConfigWithoutProxy(opts))
+		if err != nil {
+			return nil, err
+		}
 	}
 	httpUser := opts.HTTPUser
 	httpPasswd := opts.HTTPPasswd
@@ -3184,34 +3880,39 @@ func (e *Engine) httpDriverForURI(rg *requestGroup, rawURI string) (*httpproto.D
 			httpPasswd = ac.Password()
 		}
 	}
-	acceptEncoding := ""
-	if opts.HTTPAcceptGzip {
-		acceptEncoding = "deflate, gzip"
-	}
 	jar := e.cookieJar
 	if jar == nil {
 		jar = newHTTPCookieJar(opts, e.log)
 	}
 	return httpproto.NewDriver(httpproto.Opts{
-		Dialer:            dialer,
-		TLS:               httpTLS,
-		Jar:               httpCookieJar(jar),
-		Timeout:           time.Duration(parseInt(opts.Timeout)) * time.Second,
-		UserAgent:         opts.UserAgent,
-		Header:            opts.Header,
-		CheckCertificate:  &opts.CheckCertificate,
-		MaxRedirs:         20,
-		AcceptEncoding:    acceptEncoding,
-		Referer:           opts.Referer,
-		HTTPUser:          httpUser,
-		HTTPPasswd:        httpPasswd,
-		HTTPAuthChallenge: opts.HTTPAuthChallenge,
-		DisableKeepAlive:  !opts.EnableHTTPKeepAlive,
-		NoCache:           &opts.HTTPNoCache,
-		EnableWantDigest:  boolPtr(!opts.NoWantDigestHeader),
-		UseHead:           opts.UseHead,
-		DryRun:            opts.DryRun,
+		Dialer:                        dialer,
+		TLS:                           httpTLS,
+		Jar:                           httpCookieJar(jar),
+		Timeout:                       time.Duration(parseInt(opts.Timeout)) * time.Second,
+		UserAgent:                     opts.UserAgent,
+		Header:                        opts.Header,
+		ProxyURL:                      transportProxyURL,
+		CheckCertificate:              &opts.CheckCertificate,
+		MaxRedirs:                     20,
+		AcceptEncoding:                acceptEncoding,
+		Referer:                       opts.Referer,
+		HTTPUser:                      httpUser,
+		HTTPPasswd:                    httpPasswd,
+		HTTPAuthChallenge:             opts.HTTPAuthChallenge,
+		ContentDispositionDefaultUTF8: opts.ContentDispositionDefaultUTF8,
+		DisableKeepAlive:              !opts.EnableHTTPKeepAlive,
+		NoCache:                       &opts.HTTPNoCache,
+		EnableWantDigest:              boolPtr(!opts.NoWantDigestHeader),
+		UseHead:                       opts.UseHead,
+		DryRun:                        opts.DryRun,
 	}), nil
+}
+
+func rgOptionsOrDefault(rg *requestGroup, fallback *config.Options) *config.Options {
+	if rg != nil && rg.opts != nil {
+		return rg.opts
+	}
+	return fallback
 }
 
 func (e *Engine) httpRequestOptions(rg *requestGroup, outPath string) httpproto.RequestOptions {
@@ -3251,6 +3952,198 @@ func httpContentDispositionPath(opts *config.Options, filename string) string {
 	return filename
 }
 
+func (e *Engine) downloadHTTPWithRetry(ctx context.Context, rg *requestGroup, driver *httpproto.Driver, uri string, offset, size int64, opts httpproto.RequestOptions) (*httpproto.DownloadResponse, error) {
+	retryState := newHTTPRetryState(rg.opts)
+	for {
+		resp, err := driver.DownloadResponseWithOptions(ctx, uri, offset, size, opts)
+		if err == nil || errors.Is(err, httpproto.ErrNotModified) || errors.Is(err, httpproto.ErrRangeIgnored) {
+			return resp, err
+		}
+		retry, retryErr := e.shouldRetryHTTP(ctx, &retryState, err)
+		if retryErr != nil && !retry {
+			return nil, retryErr
+		}
+		if !retry {
+			return nil, err
+		}
+	}
+}
+
+func (e *Engine) applyHTTPResponseDigests(rg *requestGroup, digests []httpproto.ResponseDigest) error {
+	if rg == nil || len(digests) == 0 {
+		return nil
+	}
+	rg.integrityMu.Lock()
+	defer rg.integrityMu.Unlock()
+
+	if rg.integrity.hasWholeChecksum() {
+		for _, digest := range digests {
+			if digest.Kind != rg.integrity.wholeKind {
+				continue
+			}
+			if !bytes.Equal(digest.Digest, rg.integrity.wholeDigest) {
+				return core.NewError(core.ExitChecksumError, "invalid hash found in Digest header field")
+			}
+			return nil
+		}
+		return nil
+	}
+
+	first := digests[0]
+	rg.integrity.wholeKind = first.Kind
+	rg.integrity.wholeDigest = append([]byte(nil), first.Digest...)
+	return nil
+}
+
+func (e *Engine) nextHTTPResumeFallbackURI(rg *requestGroup, currentURI string, sessionDownloaded int64) (string, bool) {
+	if rg == nil || rg.opts == nil || rg.opts.AlwaysResume || sessionDownloaded > 0 {
+		return "", false
+	}
+	rg.resumeFailureCount++
+	if currentURI != "" {
+		if rg.resumeBlockedURIs == nil {
+			rg.resumeBlockedURIs = make(map[string]struct{})
+		}
+		rg.resumeBlockedURIs[currentURI] = struct{}{}
+	}
+	maxTries := rg.opts.MaxResumeFailureTries
+	if maxTries > 0 && rg.resumeFailureCount >= maxTries {
+		rg.resumeBlockedURIs = nil
+		return "", true
+	}
+	for _, candidate := range rg.uris {
+		if candidate == "" || blockedURI(rg.resumeBlockedURIs, candidate) {
+			continue
+		}
+		return candidate, false
+	}
+	rg.resumeBlockedURIs = nil
+	return "", true
+}
+
+func (e *Engine) clearHTTPResumeFallbackURIs(rg *requestGroup) {
+	if rg == nil {
+		return
+	}
+	rg.resumeBlockedURIs = nil
+}
+
+func ensureDownloadPlaceholder(outPath string) error {
+	if _, err := os.Stat(outPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	f, err := openHTTPScratchFile(outPath)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func (e *Engine) failHashCheckOnlyIncomplete(rg *requestGroup, outPath string) {
+	if rg == nil {
+		return
+	}
+	if err := ensureDownloadPlaceholder(outPath); err != nil {
+		rg.errCode = core.ExitFileCreateError
+		rg.errMsg = err.Error()
+		return
+	}
+	rg.errCode = core.ExitUnknownError
+	rg.errMsg = "download not complete"
+}
+
+func openHTTPScratchFile(outPath string) (*os.File, error) {
+	if dir := filepath.Dir(outPath); dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, err
+		}
+	}
+	return os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+}
+
+func markTransferCanceled(rg *requestGroup) {
+	if rg == nil {
+		return
+	}
+	switch rg.haltReason {
+	case haltReasonUserRequest:
+		rg.errCode = core.ExitRemoved
+		rg.errMsg = ""
+		return
+	case haltReasonShutdown:
+		if rg.haltRequested && !rg.forceHaltReq {
+			// Mirrors aria2's SHUTDOWN_SIGNAL path: graceful halt leaves
+			// lastErrorCode undefined so the final DownloadResult becomes IN_PROGRESS.
+			rg.errCode = 0
+			rg.errMsg = ""
+			return
+		}
+	}
+	if rg.haltRequested && !rg.forceHaltReq {
+		rg.errCode = 0
+		rg.errMsg = ""
+		return
+	}
+	rg.errCode = core.ExitRemoved
+	rg.errMsg = "download cancelled"
+}
+
+func (e *Engine) downloadToFile(ctx context.Context, rg *requestGroup, f *os.File, body io.Reader, guard *speedGuard) int64 {
+	buf := make([]byte, 64*1024)
+	var written int64
+	for {
+		select {
+		case <-ctx.Done():
+			markTransferCanceled(rg)
+			return -1
+		default:
+		}
+		n, readErr := body.Read(buf)
+		if n > 0 {
+			if err := e.rateGlobal.Wait(ctx, n); err != nil {
+				markTransferCanceled(rg)
+				return -1
+			}
+			if rg.downloadLimit != nil {
+				if err := rg.downloadLimit.Wait(ctx, n); err != nil {
+					markTransferCanceled(rg)
+					return -1
+				}
+			}
+			wn, writeErr := f.Write(buf[:n])
+			if writeErr != nil {
+				e.log.Error("disk write failed", "gid", rg.gid, "error", writeErr)
+				rg.errCode = core.ExitFileIOError
+				rg.errMsg = writeErr.Error()
+				return -1
+			}
+			written += int64(wn)
+			atomic.AddInt64(&rg.bytesDownloaded, int64(wn))
+			if err := guard.Add(wn); err != nil {
+				rg.errCode = core.ExitTooSlow
+				rg.errMsg = err.Error()
+				return -1
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			if errors.Is(readErr, context.Canceled) {
+				markTransferCanceled(rg)
+				return -1
+			}
+			e.log.Error("read failed", "gid", rg.gid, "error", readErr)
+			rg.errCode = protocolErrorCode(readErr)
+			rg.errMsg = readErr.Error()
+			return -1
+		}
+	}
+	return written
+}
+
 // runHTTPDownload performs an HTTP/HTTPS download.
 func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, outPath string) {
 	driver, err := e.httpDriverForURI(rg, uri)
@@ -3259,8 +4152,22 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 		rg.errMsg = err.Error()
 		return
 	}
+	recordURI := uri
+	defer func() {
+		if recordURI == "" {
+			return
+		}
+		if rg.errCode == core.ExitSuccess {
+			e.recordServerStatSuccess(recordURI, max64(rg.downloadSpeed, downloadAverageSpeed(rg)), max(1, rg.numConnections))
+			return
+		}
+		if rg.errCode != 0 {
+			e.markServerStatError(recordURI)
+		}
+	}()
 	size := rg.probedSize
 	acceptsRanges := rg.acceptsRanges
+	inflated := rg.inflatedResponse
 	cdFilename := rg.cdFilename
 	lastModified := rg.lastModified
 	requestOpts := e.httpRequestOptions(rg, outPath)
@@ -3276,8 +4183,14 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 			rg.errMsg = err.Error()
 			return
 		}
+		if err := e.applyHTTPResponseDigests(rg, info.Digests); err != nil {
+			rg.errCode = core.ExitChecksumError
+			rg.errMsg = err.Error()
+			return
+		}
 		size = info.Size
 		acceptsRanges = info.AcceptsRanges
+		inflated = info.Inflated
 		cdFilename = info.ContentDispositionFilename
 		lastModified = info.LastModified
 	}
@@ -3287,32 +4200,72 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 
 	rg.totalLength = size
 	rg.lastSpeedSample = time.Now()
-	e.initControlInfo(rg, outPath, size, 0, nil)
+	e.initControlInfo(rg, outPath, size, rg.integrity.controlPieceLength(0), nil)
 	existingSize := int64(0)
-	if controlOffset := e.controlResumeOffset(rg, outPath); controlOffset > 0 && acceptsRanges {
+	if inflated {
+		existingSize = 0
+	} else if controlOffset := e.controlResumeOffset(rg, outPath); controlOffset > 0 {
 		existingSize = controlOffset
 		if size > 0 && existingSize >= size {
-			rg.completedLength = size
-			rg.errCode = core.ExitSuccess
-			e.applyHTTPRemoteTime(rg, outPath, lastModified)
-			e.log.Info("download already complete", "gid", rg.gid, "size", size)
-			return
-		}
-	} else if rg.opts.Continue && acceptsRanges {
-		if st, statErr := os.Stat(outPath); statErr == nil && !st.IsDir() {
-			existingSize = st.Size()
-			if size > 0 && existingSize >= size {
+			if verifyErr := e.verifyExistingFileIntegrity(ctx, rg, outPath, size); verifyErr != nil {
+				if e.allowIntegrityRetry(rg) {
+					e.resetControlState(rg, outPath)
+					if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+						rg.errCode = core.ExitFileIOError
+						rg.errMsg = truncErr.Error()
+						return
+					}
+					existingSize = 0
+				} else {
+					rg.errCode = core.ExitChecksumError
+					rg.errMsg = verifyErr.Error()
+					return
+				}
+			}
+			if existingSize >= size {
 				rg.completedLength = size
 				rg.errCode = core.ExitSuccess
 				e.applyHTTPRemoteTime(rg, outPath, lastModified)
 				e.log.Info("download already complete", "gid", rg.gid, "size", size)
 				return
 			}
+		}
+	} else if rg.opts.Continue {
+		if st, statErr := os.Stat(outPath); statErr == nil && !st.IsDir() {
+			existingSize = st.Size()
+			if size > 0 && existingSize >= size {
+				if verifyErr := e.verifyExistingFileIntegrity(ctx, rg, outPath, size); verifyErr != nil {
+					if e.allowIntegrityRetry(rg) {
+						e.resetControlState(rg, outPath)
+						if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+							rg.errCode = core.ExitFileIOError
+							rg.errMsg = truncErr.Error()
+							return
+						}
+						existingSize = 0
+					} else {
+						rg.errCode = core.ExitChecksumError
+						rg.errMsg = verifyErr.Error()
+						return
+					}
+				}
+				if existingSize >= size {
+					rg.completedLength = size
+					rg.errCode = core.ExitSuccess
+					e.applyHTTPRemoteTime(rg, outPath, lastModified)
+					e.log.Info("download already complete", "gid", rg.gid, "size", size)
+					return
+				}
+			}
 		} else if statErr != nil && !os.IsNotExist(statErr) {
 			rg.errCode = core.ExitFileIOError
 			rg.errMsg = statErr.Error()
 			return
 		}
+	}
+	if rg.opts.HashCheckOnly {
+		e.failHashCheckOnlyIncomplete(rg, outPath)
+		return
 	}
 	if rg.opts.AllowOverwrite && !rg.opts.Continue && !e.controlLoaded(rg) {
 		if err := os.Truncate(outPath, 0); err != nil && !os.IsNotExist(err) {
@@ -3322,27 +4275,32 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 		}
 	}
 
-	var alloc disk.Allocator = disk.AllocatorNone{}
-	if rg.opts.FileAllocation == "trunc" {
-		alloc = disk.AllocatorTrunc{}
-	}
-
-	adaptor, err := disk.NewSingleFile(outPath, size, alloc)
-	if err != nil {
-		e.log.Error("cannot create output file", "gid", rg.gid, "path", outPath, "error", err)
-		rg.errCode = core.ExitFileCreateError
-		rg.errMsg = err.Error()
-		return
-	}
-	e.setControlAdaptor(rg, adaptor)
-	defer adaptor.Close()
-	defer e.syncControlAdaptor(rg)
+	alloc := chooseAllocator(rg.opts, size)
 
 	split := rg.opts.Split
 	if split < 1 {
 		split = 1
 	}
-	if acceptsRanges && size > 0 && split > 1 {
+	selectedURIs := e.selectDownloadURIs(rg, split)
+	if len(selectedURIs) == 0 {
+		selectedURIs = []string{uri}
+	}
+	rg.activeURI = selectedURIs[0]
+	rg.activeHosts = hostUseMap(selectedURIs)
+	startupIdle := time.Duration(parseInt(rg.opts.StartupIdleTime)) * time.Second
+	lowestLimit := e.effectiveLowestSpeedLimit(rg, selectedURIs)
+	if acceptsRanges && size > 0 && len(selectedURIs) > 1 {
+		adaptor, err := disk.NewSingleFile(outPath, size, alloc)
+		if err != nil {
+			e.log.Error("cannot create output file", "gid", rg.gid, "path", outPath, "error", err)
+			rg.errCode = core.ExitFileCreateError
+			rg.errMsg = err.Error()
+			return
+		}
+		e.setControlAdaptor(rg, adaptor)
+		defer adaptor.Close()
+		defer e.syncControlAdaptor(rg)
+
 		minSplitSize := parseSize(rg.opts.MinSplitSize)
 		baseCompleted := int64(0)
 		segMan := e.controlSegmentMan(rg)
@@ -3356,24 +4314,49 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 		}
 		if segMan.Done() {
 			rg.completedLength = size
+			if mode, bad, verifyErr := e.verifyIntegrity(ctx, rg, adaptor, outPath); verifyErr != nil {
+				if mode == "piece" && len(bad) > 0 && e.allowIntegrityRetry(rg) {
+					_ = adaptor.Close()
+					e.saveControlFile(rg)
+					e.runHTTPDownload(ctx, rg, uri, outPath)
+					return
+				}
+				rg.errCode = core.ExitChecksumError
+				rg.errMsg = verifyErr.Error()
+				return
+			}
 			rg.errCode = core.ExitSuccess
 			e.applyHTTPRemoteTime(rg, outPath, lastModified)
 			e.log.Info("download already complete", "gid", rg.gid, "size", size)
 			return
 		}
-		rg.numConnections = split
+		rg.numConnections = len(selectedURIs)
 
 		segmentCtx, segmentCancel := context.WithCancel(ctx)
 		defer segmentCancel()
 
 		var segMu sync.Mutex
 		firstErr := error(nil)
+		rangeIgnoredURI := ""
 
 		var wg sync.WaitGroup
-		for i := 0; i < split; i++ {
+		for i := 0; i < len(selectedURIs); i++ {
+			workerURI := selectedURIs[i]
 			wg.Add(1)
-			go func() {
+			go func(workerURI string) {
 				defer wg.Done()
+				workerDriver, derr := e.httpDriverForURI(rg, workerURI)
+				if derr != nil {
+					segMu.Lock()
+					if firstErr == nil {
+						firstErr = derr
+					}
+					segMu.Unlock()
+					segmentCancel()
+					return
+				}
+				host, _ := uriHostProto(workerURI)
+				guard := newSpeedGuard(lowestLimit, startupIdle, host)
 				for {
 					seg := segMan.Next()
 					if seg == nil {
@@ -3393,20 +4376,33 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 						segSize = seg.End - seg.Start
 					}
 
-					body, err := driver.Download(segmentCtx, uri, seg.Start, segSize)
+					resp, err := e.downloadHTTPWithRetry(segmentCtx, rg, workerDriver, workerURI, seg.Start, segSize, httpproto.RequestOptions{})
 					if err != nil {
 						e.log.Error("HTTP segment download failed", "gid", rg.gid, "start", seg.Start, "error", err)
 						segMu.Lock()
 						if firstErr == nil {
 							firstErr = err
+							if errors.Is(err, httpproto.ErrRangeIgnored) {
+								rangeIgnoredURI = workerURI
+							}
+						}
+						segMu.Unlock()
+						segmentCancel()
+						return
+					}
+					if derr := e.applyHTTPResponseDigests(rg, resp.Digests); derr != nil {
+						resp.Body.Close()
+						segMu.Lock()
+						if firstErr == nil {
+							firstErr = derr
 						}
 						segMu.Unlock()
 						segmentCancel()
 						return
 					}
 
-					written := e.downloadToAdaptor(segmentCtx, rg, adaptor, body, seg.Start)
-					body.Close()
+					written := e.downloadToAdaptor(segmentCtx, rg, adaptor, resp.Body, seg.Start, guard)
+					resp.Body.Close()
 
 					if written < 0 {
 						segMu.Lock()
@@ -3420,17 +4416,40 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 
 					segMan.MarkDone(seg.Index, written)
 				}
-			}()
+			}(workerURI)
 		}
 		wg.Wait()
 
 		if firstErr != nil {
+			if e.shouldRetryRealtimePieceCheck(rg) {
+				_ = adaptor.Close()
+				e.saveControlFile(rg)
+				e.runHTTPDownload(ctx, rg, uri, outPath)
+				return
+			}
 			if errors.Is(firstErr, httpproto.ErrRangeIgnored) {
 				if rg.opts.AlwaysResume {
 					rg.errCode = core.ExitFileAlreadyExists
 					rg.errMsg = firstErr.Error()
 					return
 				}
+				sessionDownloaded := segMan.Written() + atomic.LoadInt64(&rg.bytesDownloaded)
+				if nextURI, restartScratch := e.nextHTTPResumeFallbackURI(rg, rangeIgnoredURI, sessionDownloaded); nextURI != "" {
+					recordURI = ""
+					if closeErr := adaptor.Close(); closeErr != nil {
+						rg.errCode = core.ExitFileIOError
+						rg.errMsg = closeErr.Error()
+						return
+					}
+					rg.activeURI = nextURI
+					e.runHTTPDownload(ctx, rg, nextURI, outPath)
+					return
+				} else if !restartScratch {
+					rg.errCode = protocolErrorCode(firstErr)
+					rg.errMsg = firstErr.Error()
+					return
+				}
+				e.clearHTTPResumeFallbackURIs(rg)
 				e.log.Warn("HTTP server ignored resume range; restarting from scratch", "gid", rg.gid, "path", outPath)
 				if closeErr := adaptor.Close(); closeErr != nil {
 					rg.errCode = core.ExitFileIOError
@@ -3445,6 +4464,7 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 				oldContinue, oldSplit := rg.opts.Continue, rg.opts.Split
 				rg.opts.Continue = false
 				rg.opts.Split = 1
+				recordURI = ""
 				e.runHTTPDownload(ctx, rg, uri, outPath)
 				rg.opts.Continue, rg.opts.Split = oldContinue, oldSplit
 				return
@@ -3465,6 +4485,30 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 		if size > 0 && rg.completedLength > size {
 			rg.completedLength = size
 		}
+		if mode, bad, verifyErr := e.verifyIntegrity(ctx, rg, adaptor, outPath); verifyErr != nil {
+			if mode == "piece" && len(bad) > 0 && e.allowIntegrityRetry(rg) {
+				_ = adaptor.Close()
+				e.saveControlFile(rg)
+				e.runHTTPDownload(ctx, rg, uri, outPath)
+				return
+			}
+			if mode == "whole" && e.allowIntegrityRetry(rg) {
+				_ = adaptor.Close()
+				e.resetControlState(rg, outPath)
+				if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+					rg.errCode = core.ExitFileIOError
+					rg.errMsg = truncErr.Error()
+					return
+				}
+				e.runHTTPDownload(ctx, rg, uri, outPath)
+				return
+			}
+			rg.errCode = core.ExitChecksumError
+			rg.errMsg = verifyErr.Error()
+			return
+		}
+		e.clearHTTPResumeFallbackURIs(rg)
+		rg.resumeFailureCount = 0
 		rg.errCode = core.ExitSuccess
 		rg.numConnections = len(segMan.segments)
 		e.applyHTTPRemoteTime(rg, outPath, lastModified)
@@ -3480,37 +4524,33 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 	if size > 0 && offset > 0 {
 		requestSize = size - offset
 	}
-	body, err := driver.DownloadWithOptions(ctx, uri, offset, requestSize, requestOpts)
+	resp, err := e.downloadHTTPWithRetry(ctx, rg, driver, uri, offset, requestSize, requestOpts)
 	if errors.Is(err, httpproto.ErrRangeIgnored) && offset > 0 {
 		if rg.opts.AlwaysResume {
 			rg.errCode = core.ExitFileAlreadyExists
 			rg.errMsg = err.Error()
 			return
 		}
-		e.log.Warn("HTTP server ignored resume range; restarting from scratch", "gid", rg.gid, "path", outPath)
-		if closeErr := adaptor.Close(); closeErr != nil {
-			rg.errCode = core.ExitFileIOError
-			rg.errMsg = closeErr.Error()
+		if nextURI, restartScratch := e.nextHTTPResumeFallbackURI(rg, uri, 0); nextURI != "" {
+			recordURI = ""
+			rg.activeURI = nextURI
+			e.runHTTPDownload(ctx, rg, nextURI, outPath)
+			return
+		} else if !restartScratch {
+			rg.errCode = protocolErrorCode(err)
+			rg.errMsg = err.Error()
 			return
 		}
+		e.clearHTTPResumeFallbackURIs(rg)
+		e.log.Warn("HTTP server ignored resume range; restarting from scratch", "gid", rg.gid, "path", outPath)
 		if truncErr := os.Truncate(outPath, 0); truncErr != nil {
 			rg.errCode = core.ExitFileIOError
 			rg.errMsg = truncErr.Error()
 			return
 		}
-		adaptor, err = disk.NewSingleFile(outPath, size, alloc)
-		if err != nil {
-			e.log.Error("cannot recreate output file", "gid", rg.gid, "path", outPath, "error", err)
-			rg.errCode = core.ExitFileCreateError
-			rg.errMsg = err.Error()
-			return
-		}
-		e.setControlAdaptor(rg, adaptor)
-		defer adaptor.Close()
-		defer e.syncControlAdaptor(rg)
 		offset = 0
 		requestSize = 0
-		body, err = driver.DownloadWithOptions(ctx, uri, offset, requestSize, requestOpts)
+		resp, err = e.downloadHTTPWithRetry(ctx, rg, driver, uri, offset, requestSize, requestOpts)
 	}
 	if errors.Is(err, httpproto.ErrNotModified) {
 		e.completeHTTPNotModified(rg, outPath)
@@ -3522,13 +4562,96 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 		rg.errMsg = err.Error()
 		return
 	}
-	defer body.Close()
-
-	written := e.downloadToAdaptor(ctx, rg, adaptor, body, offset)
-	if written < 0 {
+	if err := e.applyHTTPResponseDigests(rg, resp.Digests); err != nil {
+		resp.Body.Close()
+		rg.errCode = core.ExitChecksumError
+		rg.errMsg = err.Error()
 		return
 	}
 
+	defer resp.Body.Close()
+
+	if size <= 0 || resp.Inflated {
+		rg.totalLength = 0
+		e.initControlInfo(rg, outPath, 0, 0, nil)
+		f, fileErr := openHTTPScratchFile(outPath)
+		if fileErr != nil {
+			rg.errCode = core.ExitFileCreateError
+			rg.errMsg = fileErr.Error()
+			return
+		}
+		host, _ := uriHostProto(uri)
+		guard := newSpeedGuard(lowestLimit, startupIdle, host)
+		written := e.downloadToFile(ctx, rg, f, resp.Body, guard)
+		syncErr := f.Sync()
+		closeErr := f.Close()
+		if written < 0 {
+			if syncErr != nil && !errors.Is(syncErr, os.ErrClosed) {
+				e.log.Debug("discarding sync error after failed HTTP write", "gid", rg.gid, "error", syncErr)
+			}
+			if closeErr != nil {
+				e.log.Debug("discarding close error after failed HTTP write", "gid", rg.gid, "error", closeErr)
+			}
+			return
+		}
+		if syncErr != nil {
+			e.log.Error("file sync failed", "gid", rg.gid, "error", syncErr)
+			rg.errCode = core.ExitFileIOError
+			rg.errMsg = syncErr.Error()
+			return
+		}
+		if closeErr != nil {
+			e.log.Error("file close failed", "gid", rg.gid, "error", closeErr)
+			rg.errCode = core.ExitFileIOError
+			rg.errMsg = closeErr.Error()
+			return
+		}
+		rg.completedLength = written
+		if mode, _, verifyErr := e.verifyIntegrity(ctx, rg, nil, outPath); verifyErr != nil {
+			if mode == "whole" && e.allowIntegrityRetry(rg) {
+				e.resetControlState(rg, outPath)
+				if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+					rg.errCode = core.ExitFileIOError
+					rg.errMsg = truncErr.Error()
+					return
+				}
+				e.runHTTPDownload(ctx, rg, uri, outPath)
+				return
+			}
+			rg.errCode = core.ExitChecksumError
+			rg.errMsg = verifyErr.Error()
+			return
+		}
+		e.clearHTTPResumeFallbackURIs(rg)
+		rg.resumeFailureCount = 0
+		rg.errCode = core.ExitSuccess
+		e.applyHTTPRemoteTime(rg, outPath, lastModified)
+		e.log.Info("download complete", "gid", rg.gid, "size", rg.completedLength)
+		return
+	}
+
+	adaptor, err := disk.NewSingleFile(outPath, size, alloc)
+	if err != nil {
+		e.log.Error("cannot create output file", "gid", rg.gid, "path", outPath, "error", err)
+		rg.errCode = core.ExitFileCreateError
+		rg.errMsg = err.Error()
+		return
+	}
+	e.setControlAdaptor(rg, adaptor)
+	defer adaptor.Close()
+	defer e.syncControlAdaptor(rg)
+
+	host, _ := uriHostProto(uri)
+	guard := newSpeedGuard(lowestLimit, startupIdle, host)
+	written := e.downloadToAdaptor(ctx, rg, adaptor, resp.Body, offset, guard)
+	if written < 0 {
+		if e.shouldRetryRealtimePieceCheck(rg) {
+			_ = adaptor.Close()
+			e.saveControlFile(rg)
+			e.runHTTPDownload(ctx, rg, uri, outPath)
+		}
+		return
+	}
 	if err := adaptor.Sync(); err != nil {
 		e.log.Error("file sync failed", "gid", rg.gid, "error", err)
 		rg.errCode = core.ExitFileIOError
@@ -3537,6 +4660,30 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 	}
 
 	rg.completedLength = offset + written
+	if mode, bad, verifyErr := e.verifyIntegrity(ctx, rg, adaptor, outPath); verifyErr != nil {
+		if mode == "piece" && len(bad) > 0 && acceptsRanges && e.allowIntegrityRetry(rg) {
+			_ = adaptor.Close()
+			e.saveControlFile(rg)
+			e.runHTTPDownload(ctx, rg, uri, outPath)
+			return
+		}
+		if mode == "whole" && e.allowIntegrityRetry(rg) {
+			_ = adaptor.Close()
+			e.resetControlState(rg, outPath)
+			if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+				rg.errCode = core.ExitFileIOError
+				rg.errMsg = truncErr.Error()
+				return
+			}
+			e.runHTTPDownload(ctx, rg, uri, outPath)
+			return
+		}
+		rg.errCode = core.ExitChecksumError
+		rg.errMsg = verifyErr.Error()
+		return
+	}
+	e.clearHTTPResumeFallbackURIs(rg)
+	rg.resumeFailureCount = 0
 	rg.errCode = core.ExitSuccess
 	e.applyHTTPRemoteTime(rg, outPath, lastModified)
 	e.log.Info("download complete", "gid", rg.gid, "size", rg.completedLength)
@@ -3549,6 +4696,192 @@ func (e *Engine) applyHTTPRemoteTime(rg *requestGroup, outPath string, lastModif
 	if err := os.Chtimes(outPath, time.Now(), lastModified); err != nil {
 		e.log.Warn("failed to apply Last-Modified time", "gid", rg.gid, "path", outPath, "error", err)
 	}
+}
+
+func openTransferAdaptor(path string, size int64, alloc disk.Allocator) (disk.Adaptor, error) {
+	if size > 0 {
+		return disk.NewSingleFile(path, size, alloc)
+	}
+	return newGrowableFileAdaptor(path, alloc)
+}
+
+type growableFileAdaptor struct {
+	path    string
+	f       *os.File
+	size    atomic.Int64
+	pieceMu sync.RWMutex
+	fileMu  sync.RWMutex
+	closed  atomic.Bool
+	pieces  []bool
+}
+
+func newGrowableFileAdaptor(path string, alloc disk.Allocator) (*growableFileAdaptor, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o666)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, disk.Wrap("open", path, err)
+		}
+		if dir := filepath.Dir(path); dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return nil, disk.Wrap("mkdir", path, err)
+			}
+		}
+		f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
+		if err != nil {
+			return nil, disk.Wrap("create", path, err)
+		}
+	}
+	if err := alloc.Allocate(f, 0); err != nil {
+		_ = f.Close()
+		return nil, disk.Wrap("alloc", path, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, disk.Wrap("read", path, err)
+	}
+	a := &growableFileAdaptor{path: path, f: f}
+	a.size.Store(info.Size())
+	return a, nil
+}
+
+func (a *growableFileAdaptor) OpenForWrite() error {
+	if a.closed.Load() {
+		return disk.ErrFileClosed
+	}
+	return nil
+}
+
+func (a *growableFileAdaptor) WriteAt(p []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, disk.ErrInvalidOffset
+	}
+	if a.closed.Load() {
+		return 0, disk.ErrFileClosed
+	}
+	a.fileMu.RLock()
+	f := a.f
+	a.fileMu.RUnlock()
+	if f == nil {
+		return 0, disk.ErrFileClosed
+	}
+	n, err := f.WriteAt(p, offset)
+	if err != nil {
+		return n, disk.Wrap("write", a.path, err)
+	}
+	end := offset + int64(n)
+	for {
+		cur := a.size.Load()
+		if end <= cur || a.size.CompareAndSwap(cur, end) {
+			break
+		}
+	}
+	return n, nil
+}
+
+func (a *growableFileAdaptor) ReadAt(p []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, disk.ErrInvalidOffset
+	}
+	if a.closed.Load() {
+		return 0, disk.ErrFileClosed
+	}
+	a.fileMu.RLock()
+	f := a.f
+	a.fileMu.RUnlock()
+	if f == nil {
+		return 0, disk.ErrFileClosed
+	}
+	n, err := f.ReadAt(p, offset)
+	if err != nil && err != io.EOF {
+		return n, disk.Wrap("read", a.path, err)
+	}
+	return n, err
+}
+
+func (a *growableFileAdaptor) Size() int64 {
+	return a.size.Load()
+}
+
+func (a *growableFileAdaptor) Sync() error {
+	if a.closed.Load() {
+		return disk.ErrFileClosed
+	}
+	a.fileMu.RLock()
+	f := a.f
+	a.fileMu.RUnlock()
+	if f == nil {
+		return disk.ErrFileClosed
+	}
+	if err := f.Sync(); err != nil {
+		return disk.Wrap("write", a.path, err)
+	}
+	return nil
+}
+
+func (a *growableFileAdaptor) Close() error {
+	if !a.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+	if a.f == nil {
+		return nil
+	}
+	err := a.f.Close()
+	a.f = nil
+	return err
+}
+
+func (a *growableFileAdaptor) SetPieceCount(n int) {
+	if n < 0 {
+		n = 0
+	}
+	a.pieceMu.Lock()
+	defer a.pieceMu.Unlock()
+	if len(a.pieces) == n {
+		return
+	}
+	a.pieces = make([]bool, n)
+}
+
+func (a *growableFileAdaptor) MarkPiece(i int, ok bool) {
+	a.pieceMu.Lock()
+	defer a.pieceMu.Unlock()
+	if i < 0 || i >= len(a.pieces) {
+		return
+	}
+	a.pieces[i] = ok
+}
+
+func (a *growableFileAdaptor) Have(i int) bool {
+	a.pieceMu.RLock()
+	defer a.pieceMu.RUnlock()
+	return i >= 0 && i < len(a.pieces) && a.pieces[i]
+}
+
+func (a *growableFileAdaptor) Bitfield() []byte {
+	a.pieceMu.RLock()
+	defer a.pieceMu.RUnlock()
+	out := make([]byte, (len(a.pieces)+7)/8)
+	for i, have := range a.pieces {
+		if have {
+			out[i/8] |= 1 << (7 - uint(i%8))
+		}
+	}
+	return out
+}
+
+func (a *growableFileAdaptor) Missing() []int {
+	a.pieceMu.RLock()
+	defer a.pieceMu.RUnlock()
+	var out []int
+	for i, have := range a.pieces {
+		if !have {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 func newResumeSegmentMan(totalSize int64, split int, minSplitSize, completed int64) *SegmentMan {
@@ -3588,28 +4921,25 @@ func newResumeSegmentMan(totalSize int64, split int, minSplitSize, completed int
 
 // downloadToAdaptor reads from body and writes to adaptor at the given startOffset.
 // Returns the number of bytes written, or -1 on error (caller already set rg.errCode).
-func (e *Engine) downloadToAdaptor(ctx context.Context, rg *requestGroup, adaptor disk.Adaptor, body io.Reader, startOffset int64) int64 {
+func (e *Engine) downloadToAdaptor(ctx context.Context, rg *requestGroup, adaptor disk.Adaptor, body io.Reader, startOffset int64, guard *speedGuard) int64 {
 	buf := make([]byte, 64*1024)
 	var written int64
 	for {
 		select {
 		case <-ctx.Done():
-			rg.errCode = core.ExitRemoved
-			rg.errMsg = "download cancelled"
+			markTransferCanceled(rg)
 			return -1
 		default:
 		}
 		n, readErr := body.Read(buf)
 		if n > 0 {
 			if err := e.rateGlobal.Wait(ctx, n); err != nil {
-				rg.errCode = core.ExitRemoved
-				rg.errMsg = "download cancelled"
+				markTransferCanceled(rg)
 				return -1
 			}
 			if rg.downloadLimit != nil {
 				if err := rg.downloadLimit.Wait(ctx, n); err != nil {
-					rg.errCode = core.ExitRemoved
-					rg.errMsg = "download cancelled"
+					markTransferCanceled(rg)
 					return -1
 				}
 			}
@@ -3622,16 +4952,27 @@ func (e *Engine) downloadToAdaptor(ctx context.Context, rg *requestGroup, adapto
 				return -1
 			}
 			written += int64(wn)
-			e.markControlWritten(rg, writeOffset, int64(wn))
+			completedPieces := e.markControlWritten(rg, writeOffset, int64(wn))
 			atomic.AddInt64(&rg.bytesDownloaded, int64(wn))
+			if err := guard.Add(wn); err != nil {
+				rg.errCode = core.ExitTooSlow
+				rg.errMsg = err.Error()
+				return -1
+			}
+			if rg.opts != nil && rg.opts.RealtimeChunkChecksum {
+				if err := e.verifyCompletedPieces(ctx, rg, adaptor, completedPieces); err != nil {
+					rg.errCode = core.ExitChecksumError
+					rg.errMsg = err.Error()
+					return -1
+				}
+			}
 		}
 		if readErr != nil {
 			if readErr == io.EOF {
 				break
 			}
 			if errors.Is(readErr, context.Canceled) {
-				rg.errCode = core.ExitRemoved
-				rg.errMsg = "download cancelled"
+				markTransferCanceled(rg)
 				return -1
 			}
 			e.log.Error("read failed", "gid", rg.gid, "error", readErr)
@@ -3643,27 +4984,241 @@ func (e *Engine) downloadToAdaptor(ctx context.Context, rg *requestGroup, adapto
 	return written
 }
 
+type ftpTransferConn interface {
+	Close() error
+	Size(context.Context, string) (int64, error)
+	Mdtm(context.Context, string) (time.Time, error)
+	Retrieve(context.Context, string, int64) (io.ReadCloser, error)
+}
+
+var ftpDial = func(ctx context.Context, dialer *netx.Dialer, addr string, opt ftpproto.Opt) (ftpTransferConn, error) {
+	return ftpproto.Dial(ctx, dialer, addr, opt)
+}
+
+type ftpProxyGETConn struct {
+	dialer   *netx.Dialer
+	proxyURL *url.URL
+	target   *url.URL
+	timeout  time.Duration
+
+	metaMu sync.Mutex
+	meta   *ftpProxyGETMetadata
+}
+
+type ftpProxyGETMetadata struct {
+	size    int64
+	hasSize bool
+	mdtm    time.Time
+	hasMDTM bool
+}
+
+type ftpProxyGETBody struct {
+	io.ReadCloser
+	conn net.Conn
+	done chan struct{}
+}
+
+func (b *ftpProxyGETBody) Close() error {
+	select {
+	case <-b.done:
+	default:
+		close(b.done)
+	}
+	bodyErr := b.ReadCloser.Close()
+	connErr := b.conn.Close()
+	if bodyErr != nil && connErr != nil {
+		return errors.Join(bodyErr, connErr)
+	}
+	if bodyErr != nil {
+		return bodyErr
+	}
+	return connErr
+}
+
+func (c *ftpProxyGETConn) Close() error { return nil }
+
+func (c *ftpProxyGETConn) Size(ctx context.Context, _ string) (int64, error) {
+	meta, err := c.headMetadata(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !meta.hasSize {
+		return 0, ftpproto.ErrSizeUnsupported
+	}
+	return meta.size, nil
+}
+
+func (c *ftpProxyGETConn) Mdtm(ctx context.Context, _ string) (time.Time, error) {
+	meta, err := c.headMetadata(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !meta.hasMDTM {
+		return time.Time{}, errors.New("ftp proxy GET: missing Last-Modified header")
+	}
+	return meta.mdtm, nil
+}
+
+func (c *ftpProxyGETConn) Retrieve(ctx context.Context, _ string, offset int64) (io.ReadCloser, error) {
+	resp, conn, err := c.do(ctx, http.MethodGet, offset)
+	if err != nil {
+		return nil, err
+	}
+	if offset > 0 && resp.StatusCode != http.StatusPartialContent {
+		_ = resp.Body.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("ftp proxy GET: expected 206 for offset %d, got %d", offset, resp.StatusCode)
+	}
+	if offset == 0 && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		_ = resp.Body.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("ftp proxy GET: unexpected status %d", resp.StatusCode)
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return &ftpProxyGETBody{ReadCloser: resp.Body, conn: conn, done: done}, nil
+}
+
+func (c *ftpProxyGETConn) headMetadata(ctx context.Context) (*ftpProxyGETMetadata, error) {
+	c.metaMu.Lock()
+	if c.meta != nil {
+		meta := *c.meta
+		c.metaMu.Unlock()
+		return &meta, nil
+	}
+	c.metaMu.Unlock()
+
+	resp, conn, err := c.do(ctx, http.MethodHead, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ftp proxy HEAD: unexpected status %d", resp.StatusCode)
+	}
+
+	meta := &ftpProxyGETMetadata{}
+	if cl := strings.TrimSpace(resp.Header.Get("Content-Length")); cl != "" {
+		size, err := strconv.ParseInt(cl, 10, 64)
+		if err == nil && size >= 0 {
+			meta.size = size
+			meta.hasSize = true
+		}
+	}
+	if lm := strings.TrimSpace(resp.Header.Get("Last-Modified")); lm != "" {
+		if t, err := http.ParseTime(lm); err == nil {
+			meta.mdtm = t.UTC()
+			meta.hasMDTM = true
+		}
+	}
+
+	c.metaMu.Lock()
+	c.meta = meta
+	c.metaMu.Unlock()
+	return meta, nil
+}
+
+func (c *ftpProxyGETConn) do(ctx context.Context, method string, offset int64) (*http.Response, net.Conn, error) {
+	if c.dialer == nil {
+		return nil, nil, errors.New("ftp proxy GET: missing dialer")
+	}
+	proxyAddr := c.proxyURL.Host
+	if _, _, err := net.SplitHostPort(proxyAddr); err != nil {
+		switch c.proxyURL.Scheme {
+		case "https":
+			proxyAddr = netJoinHostPort(proxyAddr, "443")
+		default:
+			proxyAddr = netJoinHostPort(proxyAddr, "80")
+		}
+	}
+	conn, err := c.dialer.DialContext(ctx, "tcp", proxyAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if deadline := requestHeaderDeadline(ctx, c.timeout); !deadline.IsZero() {
+		if err := conn.SetDeadline(deadline); err != nil {
+			_ = conn.Close()
+			return nil, nil, err
+		}
+	}
+
+	if c.proxyURL.Scheme == "https" {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: proxyTLSServerName(c.proxyURL.Hostname())})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, nil, err
+		}
+		conn = tlsConn
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.target.String(), nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	req.Close = true
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+	if auth := proxyAuthorizationHeader(c.proxyURL); auth != "" {
+		req.Header.Set("Proxy-Authorization", auth)
+	}
+	if err := req.WriteProxy(conn); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Time{})
+	}
+	return resp, conn, nil
+}
+
+type sftpTransferSession interface {
+	Close() error
+	Stat(context.Context, string) (sftpproto.FileInfo, error)
+	OpenFile(context.Context, string, int64) (io.ReadCloser, error)
+}
+
+var sftpOpen = func(ctx context.Context, dialer *netx.Dialer, opt sftpproto.Opts) (sftpTransferSession, error) {
+	return sftpproto.Open(ctx, dialer, opt)
+}
+
 // runFTPDownload performs an FTP download.
 func (e *Engine) runFTPDownload(ctx context.Context, rg *requestGroup, uri string, u *url.URL, outPath string) {
 	host := u.Host
 	if u.Port() == "" {
 		host = netJoinHostPort(u.Host, "21")
 	}
+	defer func() {
+		if rg.errCode == core.ExitSuccess {
+			e.recordServerStatSuccess(uri, max64(rg.downloadSpeed, downloadAverageSpeed(rg)), max(1, rg.numConnections))
+			return
+		}
+		if rg.errCode != 0 {
+			e.markServerStatError(uri)
+		}
+	}()
 
-	ftpUser, ftpPass := ftpCredentials(u, rg.opts, e.cfg)
+	ftpUser, ftpPass := e.ftpAuthConfig(uri, u, rg.opts)
 
-	dialer, err := e.dialerForProtocol("ftp", rg.opts)
-	if err != nil {
-		e.log.Error("FTP proxy setup failed", "gid", rg.gid, "error", err)
-		rg.errCode = core.ExitFTPProtocolError
-		rg.errMsg = err.Error()
-		return
-	}
-	conn, err := ftpproto.Dial(ctx, dialer, host, ftpproto.Opt{
-		User:    ftpUser,
-		Pass:    ftpPass,
-		Passive: rg.opts.FTPPasv,
-	})
+	conn, err := e.newFTPTransferConn(ctx, uri, u, host, ftpUser, ftpPass, rg.opts, rg.opts.FTPPasv)
 	if err != nil {
 		e.log.Error("FTP dial failed", "gid", rg.gid, "host", host, "error", err)
 		rg.errCode = core.ExitFTPProtocolError
@@ -3672,25 +5227,56 @@ func (e *Engine) runFTPDownload(ctx context.Context, rg *requestGroup, uri strin
 	}
 	defer conn.Close()
 
+	var lastModified time.Time
+	if rg.opts.RemoteTime {
+		lastModified, err = conn.Mdtm(ctx, u.Path)
+		if err != nil {
+			e.log.Info("FTP MDTM failed; continuing without remote time", "gid", rg.gid, "path", u.Path, "error", err)
+			lastModified = time.Time{}
+		}
+	}
+
 	size, err := conn.Size(ctx, u.Path)
 	if err != nil {
-		e.log.Error("FTP SIZE failed", "gid", rg.gid, "path", u.Path, "error", err)
-		rg.errCode = core.ExitFTPProtocolError
-		rg.errMsg = err.Error()
-		return
+		if errors.Is(err, ftpproto.ErrSizeUnsupported) {
+			e.log.Info("FTP SIZE unsupported; continuing with unknown length", "gid", rg.gid, "path", u.Path)
+			size = 0
+		} else {
+			e.log.Error("FTP SIZE failed", "gid", rg.gid, "path", u.Path, "error", err)
+			rg.errCode = core.ExitFTPProtocolError
+			rg.errMsg = err.Error()
+			return
+		}
 	}
 
 	rg.totalLength = size
 	rg.lastSpeedSample = time.Now()
-	e.initControlInfo(rg, outPath, size, 0, nil)
+	e.initControlInfo(rg, outPath, size, rg.integrity.controlPieceLength(0), nil)
 	offset := e.controlResumeOffset(rg, outPath)
 	if offset == 0 && rg.opts.Continue {
 		if st, statErr := os.Stat(outPath); statErr == nil && !st.IsDir() {
 			offset = st.Size()
 			if size > 0 && offset >= size {
-				rg.completedLength = size
-				rg.errCode = core.ExitSuccess
-				return
+				if verifyErr := e.verifyExistingFileIntegrity(ctx, rg, outPath, size); verifyErr != nil {
+					if e.allowIntegrityRetry(rg) {
+						e.resetControlState(rg, outPath)
+						if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+							rg.errCode = core.ExitFileIOError
+							rg.errMsg = truncErr.Error()
+							return
+						}
+						offset = 0
+					} else {
+						rg.errCode = core.ExitChecksumError
+						rg.errMsg = verifyErr.Error()
+						return
+					}
+				}
+				if offset >= size {
+					rg.completedLength = size
+					rg.errCode = core.ExitSuccess
+					return
+				}
 			}
 		} else if statErr != nil && !os.IsNotExist(statErr) {
 			rg.errCode = core.ExitFileIOError
@@ -3698,13 +5284,14 @@ func (e *Engine) runFTPDownload(ctx context.Context, rg *requestGroup, uri strin
 			return
 		}
 	}
-
-	var alloc disk.Allocator = disk.AllocatorNone{}
-	if rg.opts.FileAllocation == "trunc" {
-		alloc = disk.AllocatorTrunc{}
+	if rg.opts.HashCheckOnly {
+		e.failHashCheckOnlyIncomplete(rg, outPath)
+		return
 	}
 
-	adaptor, err := disk.NewSingleFile(outPath, size, alloc)
+	alloc := chooseAllocator(rg.opts, size)
+
+	adaptor, err := openTransferAdaptor(outPath, size, alloc)
 	if err != nil {
 		e.log.Error("cannot create output file", "gid", rg.gid, "path", outPath, "error", err)
 		rg.errCode = core.ExitFileCreateError
@@ -3714,6 +5301,8 @@ func (e *Engine) runFTPDownload(ctx context.Context, rg *requestGroup, uri strin
 	e.setControlAdaptor(rg, adaptor)
 	defer adaptor.Close()
 	defer e.syncControlAdaptor(rg)
+	hostOnly, _ := uriHostProto(uri)
+	guard := newSpeedGuard(parseSize(rg.opts.LowestSpeedLimit), time.Duration(parseInt(rg.opts.StartupIdleTime))*time.Second, hostOnly)
 
 	// Single-connection path.
 	rg.numConnections = 1
@@ -3732,8 +5321,13 @@ func (e *Engine) runFTPDownload(ctx context.Context, rg *requestGroup, uri strin
 		}
 	}()
 
-	written := e.downloadToAdaptor(ctx, rg, adaptor, body, offset)
+	written := e.downloadToAdaptor(ctx, rg, adaptor, body, offset, guard)
 	if written < 0 {
+		if e.shouldRetryRealtimePieceCheck(rg) {
+			_ = adaptor.Close()
+			e.saveControlFile(rg)
+			e.runFTPDownload(ctx, rg, uri, u, outPath)
+		}
 		return
 	}
 	bodyClosed = true
@@ -3752,7 +5346,24 @@ func (e *Engine) runFTPDownload(ctx context.Context, rg *requestGroup, uri strin
 	}
 
 	rg.completedLength = offset + written
+	if mode, _, verifyErr := e.verifyIntegrity(ctx, rg, adaptor, outPath); verifyErr != nil {
+		if mode == "whole" && e.allowIntegrityRetry(rg) {
+			_ = adaptor.Close()
+			e.resetControlState(rg, outPath)
+			if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+				rg.errCode = core.ExitFileIOError
+				rg.errMsg = truncErr.Error()
+				return
+			}
+			e.runFTPDownload(ctx, rg, uri, u, outPath)
+			return
+		}
+		rg.errCode = core.ExitChecksumError
+		rg.errMsg = verifyErr.Error()
+		return
+	}
 	rg.errCode = core.ExitSuccess
+	e.applyHTTPRemoteTime(rg, outPath, lastModified)
 	e.log.Info("download complete", "gid", rg.gid, "size", rg.completedLength)
 }
 
@@ -3765,34 +5376,34 @@ func (e *Engine) runSFTPDownload(ctx context.Context, rg *requestGroup, uri stri
 			port = v
 		}
 	}
-
-	user := u.User.Username()
-	pass, _ := u.User.Password()
-	if user == "" {
-		user = rg.opts.FTPUser
-		if user == "" {
-			user = e.cfg.FTPUser
+	defer func() {
+		if rg.errCode == core.ExitSuccess {
+			e.recordServerStatSuccess(uri, max64(rg.downloadSpeed, downloadAverageSpeed(rg)), max(1, rg.numConnections))
+			return
 		}
-	}
-	if pass == "" {
-		pass = rg.opts.FTPPasswd
-		if pass == "" {
-			pass = e.cfg.FTPPasswd
+		if rg.errCode != 0 {
+			e.markServerStatError(uri)
 		}
-	}
+	}()
 
-	dialer, err := e.dialerForProtocol("sftp", rg.opts)
+	user, pass := e.ftpAuthConfig(uri, u, rg.opts)
+
+	dialer, err := e.dialerForProtocol("sftp", host, rg.opts)
 	if err != nil {
 		e.log.Error("SFTP proxy setup failed", "gid", rg.gid, "error", err)
 		rg.errCode = core.ExitFTPProtocolError
 		rg.errMsg = err.Error()
 		return
 	}
-	sess, err := sftpproto.Open(ctx, dialer, sftpproto.Opts{
-		Host:      host,
-		Port:      port,
-		User:      user,
-		Auth:      sftpproto.AuthMethods{Password: pass},
+	sess, err := sftpOpen(ctx, dialer, sftpproto.Opts{
+		Host: host,
+		Port: port,
+		User: user,
+		Auth: sftpproto.AuthMethods{
+			Password:    pass,
+			KeyFile:     rg.opts.PrivateKey,
+			AgentSocket: os.Getenv("SSH_AUTH_SOCK"),
+		},
 		HostKeyMD: rg.opts.SSHHostKeyMD,
 	})
 	if err != nil {
@@ -3816,17 +5427,35 @@ func (e *Engine) runSFTPDownload(ctx context.Context, rg *requestGroup, uri stri
 	}
 
 	size := info.Size
+	lastModified := info.ModTime
 	rg.totalLength = size
 	rg.lastSpeedSample = time.Now()
-	e.initControlInfo(rg, outPath, size, 0, nil)
+	e.initControlInfo(rg, outPath, size, rg.integrity.controlPieceLength(0), nil)
 	offset := e.controlResumeOffset(rg, outPath)
 	if offset == 0 && rg.opts.Continue {
 		if st, statErr := os.Stat(outPath); statErr == nil && !st.IsDir() {
 			offset = st.Size()
 			if size > 0 && offset >= size {
-				rg.completedLength = size
-				rg.errCode = core.ExitSuccess
-				return
+				if verifyErr := e.verifyExistingFileIntegrity(ctx, rg, outPath, size); verifyErr != nil {
+					if e.allowIntegrityRetry(rg) {
+						e.resetControlState(rg, outPath)
+						if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+							rg.errCode = core.ExitFileIOError
+							rg.errMsg = truncErr.Error()
+							return
+						}
+						offset = 0
+					} else {
+						rg.errCode = core.ExitChecksumError
+						rg.errMsg = verifyErr.Error()
+						return
+					}
+				}
+				if offset >= size {
+					rg.completedLength = size
+					rg.errCode = core.ExitSuccess
+					return
+				}
 			}
 		} else if statErr != nil && !os.IsNotExist(statErr) {
 			rg.errCode = core.ExitFileIOError
@@ -3834,13 +5463,14 @@ func (e *Engine) runSFTPDownload(ctx context.Context, rg *requestGroup, uri stri
 			return
 		}
 	}
-
-	var alloc disk.Allocator = disk.AllocatorNone{}
-	if rg.opts.FileAllocation == "trunc" {
-		alloc = disk.AllocatorTrunc{}
+	if rg.opts.HashCheckOnly {
+		e.failHashCheckOnlyIncomplete(rg, outPath)
+		return
 	}
 
-	adaptor, err := disk.NewSingleFile(outPath, size, alloc)
+	alloc := chooseAllocator(rg.opts, size)
+
+	adaptor, err := openTransferAdaptor(outPath, size, alloc)
 	if err != nil {
 		e.log.Error("cannot create output file", "gid", rg.gid, "path", outPath, "error", err)
 		rg.errCode = core.ExitFileCreateError
@@ -3850,6 +5480,7 @@ func (e *Engine) runSFTPDownload(ctx context.Context, rg *requestGroup, uri stri
 	e.setControlAdaptor(rg, adaptor)
 	defer adaptor.Close()
 	defer e.syncControlAdaptor(rg)
+	guard := newSpeedGuard(parseSize(rg.opts.LowestSpeedLimit), time.Duration(parseInt(rg.opts.StartupIdleTime))*time.Second, host)
 
 	reader, err := sess.OpenFile(ctx, u.Path, offset)
 	if err != nil {
@@ -3866,8 +5497,13 @@ func (e *Engine) runSFTPDownload(ctx context.Context, rg *requestGroup, uri stri
 	}()
 
 	rg.numConnections = 1
-	written := e.downloadToAdaptor(ctx, rg, adaptor, reader, offset)
+	written := e.downloadToAdaptor(ctx, rg, adaptor, reader, offset, guard)
 	if written < 0 {
+		if e.shouldRetryRealtimePieceCheck(rg) {
+			_ = adaptor.Close()
+			e.saveControlFile(rg)
+			e.runSFTPDownload(ctx, rg, uri, u, outPath)
+		}
 		return
 	}
 	readerClosed = true
@@ -3886,7 +5522,24 @@ func (e *Engine) runSFTPDownload(ctx context.Context, rg *requestGroup, uri stri
 	}
 
 	rg.completedLength = offset + written
+	if mode, _, verifyErr := e.verifyIntegrity(ctx, rg, adaptor, outPath); verifyErr != nil {
+		if mode == "whole" && e.allowIntegrityRetry(rg) {
+			_ = adaptor.Close()
+			e.resetControlState(rg, outPath)
+			if truncErr := os.Truncate(outPath, 0); truncErr != nil {
+				rg.errCode = core.ExitFileIOError
+				rg.errMsg = truncErr.Error()
+				return
+			}
+			e.runSFTPDownload(ctx, rg, uri, u, outPath)
+			return
+		}
+		rg.errCode = core.ExitChecksumError
+		rg.errMsg = verifyErr.Error()
+		return
+	}
 	rg.errCode = core.ExitSuccess
+	e.applyHTTPRemoteTime(rg, outPath, lastModified)
 	e.log.Info("download complete", "gid", rg.gid, "size", rg.completedLength)
 }
 
@@ -3914,13 +5567,55 @@ func (e *Engine) runMetalinkDownload(ctx context.Context, rg *requestGroup, meta
 		return
 	}
 
+	entries = metalinkPrimaryEntries(entries)
 	entry := entries[0]
+	rg.integrity = applyMetalinkIntegrity(rg.integrity, entry)
 	if rg.filePath == "" && entry.Name != "" {
 		rg.filePath = filepath.Join(rg.opts.Dir, entry.Name)
+		rg.fileName = filepath.Base(entry.Name)
 	}
 	if entry.SizeKnown {
 		rg.totalLength = entry.Size
 	}
+
+	var (
+		lastErrCode core.ErrorCode
+		lastErrMsg  string
+	)
+	for i, entry := range entries {
+		if entry.SizeKnown {
+			rg.totalLength = entry.Size
+		}
+		rg.errCode = 0
+		rg.errMsg = ""
+		if i > 0 {
+			e.log.Warn("metalink mirror failed; trying next", "gid", rg.gid, "uri", entry.URI, "attempt", i+1, "mirrors", len(entries))
+		}
+		e.runMetalinkEntry(ctx, rg, entry)
+		if rg.errCode == core.ExitSuccess {
+			if code, msg := verifyMetalinkDownload(ctx, rg.filePath, entry); code != core.ExitSuccess {
+				rg.errCode = code
+				rg.errMsg = msg
+			}
+			return
+		}
+		lastErrCode, lastErrMsg = rg.errCode, rg.errMsg
+		if rg.errCode == core.ExitRemoved || ctx.Err() != nil {
+			return
+		}
+	}
+	if lastErrCode != 0 {
+		rg.errCode = lastErrCode
+		rg.errMsg = lastErrMsg
+		return
+	}
+
+	e.log.Error("metalink download exhausted all mirrors", "gid", rg.gid)
+	rg.errCode = core.ExitResourceNotFound
+	rg.errMsg = "no usable URIs in metalink"
+}
+
+func (e *Engine) runMetalinkEntry(ctx context.Context, rg *requestGroup, entry metalinkDownloadEntry) {
 	uri := entry.URI
 	u, errParse := url.Parse(uri)
 	if errParse != nil {
@@ -3960,25 +5655,15 @@ type metalinkDownloadEntry struct {
 }
 
 func metalinkDownloadEntries(data []byte, opts *config.Options) ([]metalinkDownloadEntry, error) {
-	doc, err := metalink.Parse(bytes.NewReader(data))
+	parseOpts, queryOpts := metalinkOptions(opts)
+	doc, err := metalink.ParseWithOptions(bytes.NewReader(data), parseOpts)
 	if err != nil {
 		return nil, err
 	}
-	preferred := ""
-	if opts != nil {
-		preferred = opts.MetalinkPreferredProtocol
-	}
+	doc = metalink.Query(doc, queryOpts)
 	var entries []metalinkDownloadEntry
 	for _, f := range doc.Files {
-		urls := append([]metalink.URLEntry(nil), f.URLs...)
-		sort.SliceStable(urls, func(i, j int) bool {
-			pi := metalinkProtocolRank(urls[i].Type, preferred)
-			pj := metalinkProtocolRank(urls[j].Type, preferred)
-			if pi != pj {
-				return pi < pj
-			}
-			return urls[i].Priority < urls[j].Priority
-		})
+		urls := metalink.OrderURLs(f.URLs, queryOpts)
 		for _, u := range urls {
 			if u.URL == "" {
 				continue
@@ -3999,6 +5684,51 @@ func metalinkDownloadEntries(data []byte, opts *config.Options) ([]metalinkDownl
 		}
 	}
 	return entries, nil
+}
+
+func metalinkOptions(opts *config.Options) (metalink.ParseOptions, metalink.QueryOptions) {
+	parseOpts := metalink.ParseOptions{}
+	queryOpts := metalink.QueryOptions{}
+	if opts == nil {
+		return parseOpts, queryOpts
+	}
+	parseOpts.BaseURI = opts.MetalinkBaseURI
+	queryOpts.Version = opts.MetalinkVersion
+	queryOpts.Language = opts.MetalinkLanguage
+	queryOpts.OS = opts.MetalinkOS
+	queryOpts.PreferredProtocol = opts.MetalinkPreferredProtocol
+	if opts.MetalinkLocation != "" {
+		for _, location := range strings.Split(opts.MetalinkLocation, ",") {
+			location = strings.TrimSpace(location)
+			if location == "" {
+				continue
+			}
+			queryOpts.Locations = append(queryOpts.Locations, location)
+		}
+	}
+	return parseOpts, queryOpts
+}
+
+func metalinkPrimaryEntries(entries []metalinkDownloadEntry) []metalinkDownloadEntry {
+	if len(entries) < 2 {
+		return entries
+	}
+	primary := entries[0]
+	limit := 1
+	for limit < len(entries) && sameMetalinkEntryFile(primary, entries[limit]) {
+		limit++
+	}
+	return entries[:limit]
+}
+
+func sameMetalinkEntryFile(a, b metalinkDownloadEntry) bool {
+	if a.Name != b.Name || a.SizeKnown != b.SizeKnown {
+		return false
+	}
+	if a.SizeKnown && a.Size != b.Size {
+		return false
+	}
+	return true
 }
 
 func cloneMetalinkHashes(src map[hash.Kind][]byte) map[hash.Kind][]byte {
@@ -4023,16 +5753,6 @@ func cloneByteSlices(src [][]byte) [][]byte {
 	return dst
 }
 
-func metalinkProtocolRank(proto, preferred string) int {
-	if preferred == "" || preferred == "none" {
-		return 1
-	}
-	if strings.EqualFold(proto, preferred) {
-		return 0
-	}
-	return 1
-}
-
 func ftpCredentials(u *url.URL, opts, global *config.Options) (string, string) {
 	user := u.User.Username()
 	pass, _ := u.User.Password()
@@ -4051,31 +5771,203 @@ func ftpCredentials(u *url.URL, opts, global *config.Options) (string, string) {
 	return user, pass
 }
 
-func (e *Engine) dialerForProtocol(proto string, opts *config.Options) (*netx.Dialer, error) {
+func (e *Engine) ftpAuthConfig(rawURI string, u *url.URL, opts *config.Options) (string, string) {
+	if e.authFactory != nil {
+		if ac := e.authFactory.CreateAuthConfig(rawURI, opts); ac != nil {
+			return ac.User(), ac.Password()
+		}
+	}
+	return ftpCredentials(u, opts, e.cfg)
+}
+
+func verifyMetalinkDownload(ctx context.Context, path string, entry metalinkDownloadEntry) (core.ErrorCode, string) {
+	if len(entry.Pieces) > 0 && entry.PieceHashKind != "" && entry.PieceLength > 0 {
+		if err := verifyMetalinkPieceHashes(ctx, path, entry.PieceHashKind, entry.PieceLength, entry.Pieces); err != nil {
+			return metalinkVerificationError(err)
+		}
+	}
+	if kind, digest, ok := metalink.StrongestHash(entry.Hashes); ok {
+		if err := verifyMetalinkFileHash(ctx, path, kind, digest); err != nil {
+			return metalinkVerificationError(err)
+		}
+	}
+	return core.ExitSuccess, ""
+}
+
+func metalinkVerificationError(err error) (core.ErrorCode, string) {
+	if err == nil {
+		return core.ExitSuccess, ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return core.ExitRemoved, "download cancelled"
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return core.ExitFileIOError, err.Error()
+	}
+	return core.ExitChecksumError, err.Error()
+}
+
+func verifyMetalinkFileHash(ctx context.Context, path string, kind hash.Kind, want []byte) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s for hash verification: %w", path, err)
+	}
+	defer f.Close()
+
+	h, err := hash.New(kind)
+	if err != nil {
+		return err
+	}
+	defer hash.PoolPut(kind, h)
+
+	buf := make([]byte, 64*1024)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			if _, err := h.Write(buf[:n]); err != nil {
+				return err
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return fmt.Errorf("read %s for hash verification: %w", path, readErr)
+		}
+	}
+
+	if got := h.Sum(nil); !bytes.Equal(got, want) {
+		return fmt.Errorf("metalink file hash mismatch for %s (%s)", path, kind)
+	}
+	return nil
+}
+
+func verifyMetalinkPieceHashes(ctx context.Context, path string, kind hash.Kind, pieceLength int64, pieces [][]byte) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s for piece verification: %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s for piece verification: %w", path, err)
+	}
+	size := info.Size()
+	if pieceLength <= 0 {
+		return fmt.Errorf("invalid metalink piece length %d", pieceLength)
+	}
+	if int64(len(pieces))*pieceLength < size {
+		return fmt.Errorf("metalink piece hash set shorter than file %s", path)
+	}
+
+	h, err := hash.New(kind)
+	if err != nil {
+		return err
+	}
+	defer hash.PoolPut(kind, h)
+
+	buf := make([]byte, 64*1024)
+	for i, want := range pieces {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		start := int64(i) * pieceLength
+		if start >= size {
+			return fmt.Errorf("metalink piece hash set longer than file %s", path)
+		}
+		length := pieceLength
+		if remaining := size - start; remaining < length {
+			length = remaining
+		}
+		h.Reset()
+		n, err := io.CopyBuffer(h, io.LimitReader(f, length), buf)
+		if err != nil {
+			return fmt.Errorf("read piece %d for %s: %w", i, path, err)
+		}
+		if n != length {
+			return fmt.Errorf("short read verifying piece %d for %s", i, path)
+		}
+		if got := h.Sum(nil); !bytes.Equal(got, want) {
+			return fmt.Errorf("metalink piece hash mismatch for %s piece %d (%s)", path, i, kind)
+		}
+	}
+
+	return nil
+}
+
+func (e *Engine) dialerForProtocol(proto, targetHost string, opts *config.Options) (*netx.Dialer, error) {
 	if opts == nil {
 		opts = e.cfg
 	}
-	proxyURI := resolveProxyURI(proto, opts)
-	if proxyURI == "" {
+	proxyURI := resolveProxyURIForTarget(proto, targetHost, opts)
+	if proxyURI == "" && opts == e.cfg {
 		return e.netDialer, nil
 	}
 	cfg := engineDialerConfig(opts)
-	cfg.ProxyURL = proxyURI
+	if proxyURI != "" {
+		cfg.ProxyURL = proxyURI
+		cfg.NoProxy = ""
+	}
 	return netx.NewDialer(cfg)
+}
+
+func (e *Engine) dialerWithoutProxy(opts *config.Options) (*netx.Dialer, error) {
+	if opts == nil || opts == e.cfg {
+		return e.netDialer, nil
+	}
+	return netx.NewDialer(engineDialerConfigWithoutProxy(opts))
+}
+
+func (e *Engine) newFTPTransferConn(ctx context.Context, rawURI string, u *url.URL, host, user, pass string, opts *config.Options, pasv bool) (ftpTransferConn, error) {
+	if opts == nil {
+		opts = e.cfg
+	}
+	if proxyURI := resolveProxyURIForTarget("ftp", u.Hostname(), opts); proxyURI != "" && resolveHTTPProxyMethod("ftp", opts) == "get" {
+		proxyURL, err := url.Parse(proxyURI)
+		if err != nil {
+			return nil, err
+		}
+		dialer, err := e.dialerWithoutProxy(opts)
+		if err != nil {
+			return nil, err
+		}
+		return &ftpProxyGETConn{
+			dialer:   dialer,
+			proxyURL: proxyURL,
+			target:   ftpProxyTargetURL(u, rawURI, user, pass),
+			timeout:  time.Duration(parseInt(opts.ConnectTimeout)) * time.Second,
+		}, nil
+	}
+
+	dialer, err := e.dialerForProtocol("ftp", host, opts)
+	if err != nil {
+		return nil, err
+	}
+	return ftpDial(ctx, dialer, host, ftpproto.Opt{
+		User:            user,
+		Pass:            pass,
+		Type:            opts.FTPType,
+		Passive:         pasv,
+		ReuseConnection: opts.FTPReuseConnection,
+	})
 }
 
 // downloadFTPSegment performs a ranged FTP download segment. It opens a new
 // FTP connection, retrieves the given byte range, and writes to the adaptor.
 func (e *Engine) downloadFTPSegment(ctx context.Context, host, path, user, pass string, pasv bool, rg *requestGroup, adaptor disk.Adaptor, seg *Segment) (int64, error) {
-	dialer, err := e.dialerForProtocol("ftp", rg.opts)
-	if err != nil {
-		return -1, err
-	}
-	conn, err := ftpproto.Dial(ctx, dialer, host, ftpproto.Opt{
-		User:    user,
-		Pass:    pass,
-		Passive: pasv,
-	})
+	targetURL := &url.URL{Scheme: "ftp", Host: host, Path: path}
+	conn, err := e.newFTPTransferConn(ctx, targetURL.String(), targetURL, host, user, pass, rg.opts, pasv)
 	if err != nil {
 		return -1, err
 	}
@@ -4097,7 +5989,9 @@ func (e *Engine) downloadFTPSegment(ctx context.Context, host, path, user, pass 
 		body = io.NopCloser(io.LimitReader(body, seg.End-seg.Start))
 	}
 
-	written := e.downloadToAdaptor(ctx, rg, adaptor, body, seg.Start)
+	hostOnly, _ := uriHostProto("ftp://" + host)
+	guard := newSpeedGuard(parseSize(rg.opts.LowestSpeedLimit), time.Duration(parseInt(rg.opts.StartupIdleTime))*time.Second, hostOnly)
+	written := e.downloadToAdaptor(ctx, rg, adaptor, body, seg.Start, guard)
 	if written < 0 {
 		return -1, fmt.Errorf("%s: %s", rg.errCode, rg.errMsg)
 	}
@@ -4146,13 +6040,15 @@ func parseListenPort(s string) int {
 }
 
 // runHookExec fires a hook command with the standard aria2 arguments:
-// command, GID (hex), numFiles (decimal), firstFilename.
+// command, GID (hex), numFiles (decimal), firstFilename. aria2 passes the
+// first requested file-entry path directly, which can legitimately be empty
+// before a path is fully resolved for an active transfer.
 func (e *Engine) runHookExec(rg *requestGroup, numFiles int, command string) {
 	if command == "" {
 		return
 	}
 	e.log.Debug("executing hook", "command", command, "gid", rg.gid)
-	if err := hookrunner.Run(e.ctx, command, rg.gid.Hex(), strconv.Itoa(numFiles), rg.getFirstFilePath()); err != nil {
+	if err := hookrunner.Run(e.ctx, command, rg.gid.Hex(), strconv.Itoa(numFiles), rg.hookFirstFilename()); err != nil {
 		e.log.Error("hook execution failed", "command", command, "error", err)
 	}
 }
@@ -4190,7 +6086,10 @@ func (e *Engine) runStopHook(rg *requestGroup, errCode core.ErrorCode) {
 	}
 	if errCode == core.ExitSuccess && e.cfg.OnDownloadComplete != "" {
 		hookName = "on-download-complete"
-	} else if errCode != core.ExitSuccess && errCode != core.ExitRemoved && e.cfg.OnDownloadError != "" {
+	} else if errCode != core.ExitSuccess &&
+		errCode != core.ExitInProgress &&
+		errCode != core.ExitRemoved &&
+		e.cfg.OnDownloadError != "" {
 		hookName = "on-download-error"
 	}
 	e.runHookByName(rg, 1, hookName)
@@ -4208,6 +6107,20 @@ func protocolErrorCode(err error) core.ErrorCode {
 		return core.ExitTimeout
 	}
 	return core.CodeFrom(err)
+}
+
+func protocolErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	var coreErr *core.Error
+	if errors.As(err, &coreErr) {
+		if coreErr.Cause != nil {
+			return coreErr.Message + ": " + coreErr.Cause.Error()
+		}
+		return coreErr.Message
+	}
+	return err.Error()
 }
 
 // netJoinHostPort is a local copy of net.JoinHostPort to avoid import cycle.
@@ -4240,6 +6153,16 @@ func defaultOutputPathFromURI(rawURI string) string {
 func (rg *requestGroup) getFirstFilePath() string {
 	if rg.inMemory {
 		return "[MEMORY]" + filepath.Base(rg.filePath)
+	}
+	return rg.filePath
+}
+
+func (rg *requestGroup) hookFirstFilename() string {
+	if rg == nil || rg.inMemory {
+		return ""
+	}
+	if rg.filePath == "" || !filepath.IsAbs(rg.filePath) {
+		return ""
 	}
 	return rg.filePath
 }
@@ -4434,6 +6357,113 @@ func resolveProxyURI(proto string, opts *config.Options) string {
 	}
 }
 
+func resolveProxyURIForTarget(proto, targetHost string, opts *config.Options) string {
+	if proxyBypassed(targetHost, opts) {
+		return ""
+	}
+	return resolveProxyURI(proto, opts)
+}
+
+func proxyBypassed(targetHost string, opts *config.Options) bool {
+	if opts == nil || opts.NoProxy == "" || targetHost == "" {
+		return false
+	}
+	host := normalizeProxyHost(targetHost)
+	if host == "" {
+		return false
+	}
+	for _, raw := range strings.Split(opts.NoProxy, ",") {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		if noProxyEntryMatchesHost(host, entry) {
+			return true
+		}
+	}
+	return false
+}
+
+func noProxyEntryMatchesHost(host, entry string) bool {
+	host = normalizeProxyHost(host)
+	entry = normalizeProxyHost(entry)
+	if host == "" || entry == "" {
+		return false
+	}
+	if strings.Contains(entry, "/") {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return false
+		}
+		addr, err := netip.ParseAddr(host)
+		return err == nil && prefix.Contains(addr)
+	}
+	if strings.HasPrefix(entry, ".") && !isNumericHost(host) {
+		return strings.HasSuffix(host, entry)
+	}
+	return host == entry
+}
+
+func normalizeProxyHost(host string) string {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+func isNumericHost(host string) bool {
+	_, err := netip.ParseAddr(normalizeProxyHost(host))
+	return err == nil
+}
+
+func resolveHTTPProxyMethod(proto string, opts *config.Options) string {
+	if opts != nil && opts.ProxyMethod == "tunnel" {
+		return "tunnel"
+	}
+	if proto == "https" || proto == "sftp" {
+		return "tunnel"
+	}
+	return "get"
+}
+
+func ftpProxyTargetURL(u *url.URL, rawURI, user, pass string) *url.URL {
+	target := *u
+	if rawURI != "" {
+		if parsed, err := url.Parse(rawURI); err == nil {
+			target = *parsed
+		}
+	}
+	if user != "" || pass != "" {
+		target.User = url.UserPassword(user, pass)
+	}
+	return &target
+}
+
+func proxyAuthorizationHeader(proxyURL *url.URL) string {
+	if proxyURL == nil || proxyURL.User == nil {
+		return ""
+	}
+	user := proxyURL.User.Username()
+	pass, _ := proxyURL.User.Password()
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+}
+
+func proxyTLSServerName(host string) string {
+	if ip := net.ParseIP(host); ip != nil {
+		return ""
+	}
+	return host
+}
+
+func requestHeaderDeadline(ctx context.Context, timeout time.Duration) time.Time {
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	if ctxDeadline, ok := ctx.Deadline(); ok && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
+		deadline = ctxDeadline
+	}
+	return deadline
+}
+
 // GlobalStat holds aggregate engine statistics matching aria2's getGlobalStat
 // RPC response (downloadSpeed, uploadSpeed, numActive, numWaiting, numStopped,
 // numStoppedTotal).
@@ -4465,64 +6495,6 @@ func (e *Engine) GetGlobalStat() GlobalStat {
 		NumStopped:      e.stoppedRing.len(),
 		NumStoppedTotal: e.stoppedTotal.Load(),
 	}
-}
-
-// makeStatus builds a Status snapshot from a requestGroup. Caller must hold the
-// shard lock for rg.gid.
-func (e *Engine) makeStatus(rg *requestGroup) *Status {
-	dir := ""
-	if rg.opts != nil {
-		dir = rg.opts.Dir
-	}
-	st := rg.state
-	if rg.pauseReq && st == core.StatusWaiting {
-		st = core.StatusPaused
-	}
-	files := e.buildFileStatus(rg)
-
-	return &Status{
-		GID:             rg.gid,
-		Status:          st,
-		Seeder:          rg.seeder,
-		ErrorCode:       rg.errCode,
-		ErrorMessage:    rg.errMsg,
-		Dir:             dir,
-		TotalLength:     rg.totalLength,
-		CompletedLength: rg.completedLength,
-		DownloadSpeed:   rg.downloadSpeed,
-		UploadSpeed:     rg.uploadSpeed,
-		Connections:     rg.numConnections,
-		Files:           files,
-		BelongsTo:       rg.belongsTo,
-		Following:       rg.following,
-		FollowedBy:      rg.followedBy,
-	}
-}
-
-func (e *Engine) buildFileStatus(rg *requestGroup) []FileStatus {
-	if len(rg.uris) == 0 {
-		return nil
-	}
-	path := rg.filePath
-	if path == "" {
-		path = rg.uris[0]
-	}
-	uris := make([]URIStatus, len(rg.uris))
-	for i, u := range rg.uris {
-		uriState := "waiting"
-		if rg.state == core.StatusActive && i == 0 {
-			uriState = "used"
-		}
-		uris[i] = URIStatus{URI: u, Status: uriState}
-	}
-	return []FileStatus{{
-		Index:           1,
-		Path:            path,
-		Length:          rg.totalLength,
-		CompletedLength: rg.completedLength,
-		Selected:        true,
-		URIs:            uris,
-	}}
 }
 
 // statusToRPC converts a Status snapshot to the aria2 JSON-RPC map format,
@@ -4634,25 +6606,19 @@ func boolStrVal(v bool) string {
 // RPC-compatible map. If keys is non-empty, only the requested keys are included
 // (matching aria2's tellStatus keys parameter behavior).
 func (e *Engine) TellStatusKeys(gid core.GID, keys []string) (map[string]any, error) {
-	rg, ok := e.groups.get(gid)
+	rg, ok := e.groups.getLocked(gid)
 	if ok {
-		return e.statusToRPC(e.makeStatus(rg), keys), nil
+		status := e.makeStatus(rg)
+		e.groups.unlock(gid)
+		return e.statusToRPC(status, keys), nil
 	}
 
 	dr, found := e.stoppedRing.getByGID(gid)
 	if !found {
 		return nil, fmt.Errorf("engine: download GID#%s not found", gid)
 	}
-	s := &Status{
-		GID:          gid,
-		Status:       dr.state,
-		ErrorCode:    dr.errCode,
-		ErrorMessage: dr.errMsg,
-		BelongsTo:    dr.belongsTo,
-		Following:    dr.following,
-		FollowedBy:   dr.followedBy,
-	}
-	return e.statusToRPC(s, keys), nil
+	s := cloneStatusSnapshot(dr.statusSnapshot)
+	return e.statusToRPC(&s, keys), nil
 }
 
 // TellActiveKeys returns status maps of all active downloads, filtered to the

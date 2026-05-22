@@ -158,6 +158,47 @@ func TestJSONRPCBatchRequest(t *testing.T) {
 	}
 }
 
+func TestJSONRPCBatchRequestMixedInvalidEntries(t *testing.T) {
+	disp := &mockDispatcher{
+		call: func(method string, params []any) (any, error) {
+			if method != "aria2.getVersion" {
+				return nil, fmt.Errorf("unexpected method %q", method)
+			}
+			return "1.37.0", nil
+		},
+	}
+	ts := newTestServer(disp)
+	defer closeTestServer(ts)
+
+	body := `[
+		{"jsonrpc":"2.0","id":"ok","method":"aria2.getVersion","params":[]},
+		{"jsonrpc":"2.0","id":"bad","params":[]}
+	]`
+	resp, err := http.Post(ts.URL+"/jsonrpc", "application/json-rpc", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	var batch []jsonrpc.Response
+	if err := json.Unmarshal(b, &batch); err != nil {
+		t.Fatalf("unmarshal batch response: %v; body=%s", err, string(b))
+	}
+	if len(batch) != 2 {
+		t.Fatalf("len(batch) = %d, want 2", len(batch))
+	}
+	if batch[0].Error != nil || batch[0].Result != "1.37.0" {
+		t.Fatalf("batch[0] = %+v, want success result", batch[0])
+	}
+	if batch[1].Error == nil || batch[1].Error.Code != jsonrpc.ErrCodeInvalidRequest {
+		t.Fatalf("batch[1] = %+v, want invalid request error", batch[1])
+	}
+	if batch[1].ID != "bad" {
+		t.Fatalf("batch[1].id = %#v, want %q", batch[1].ID, "bad")
+	}
+}
+
 func TestJSONRPCEmptyBatchReturnsEmptyArray(t *testing.T) {
 	disp := &mockDispatcher{}
 	ts := newTestServer(disp)
@@ -191,6 +232,140 @@ func TestJSONRPCParseError(t *testing.T) {
 	}
 	if r.Error == nil || r.Error.Code != jsonrpc.ErrCodeParse {
 		t.Errorf("error code = %d, want %d", getErrorCode(r.Error), jsonrpc.ErrCodeParse)
+	}
+}
+
+func TestOversizedRPCPOSTClosesWithoutResponse(t *testing.T) {
+	disp := &mockDispatcher{
+		call: func(method string, params []any) (any, error) {
+			return nil, fmt.Errorf("dispatcher should not be called for oversized %s", method)
+		},
+	}
+	cfg := Config{
+		Listen:         ":0",
+		AllowedOrigins: []string{"*"},
+		Dispatcher:     disp,
+		MaxRequestSize: 16,
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewUnstartedServer(srv.http.Handler)
+	ts.EnableHTTP2 = false
+	ts.Start()
+	defer ts.Close()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	cases := []struct {
+		name        string
+		path        string
+		contentType string
+	}{
+		{name: "jsonrpc", path: "/jsonrpc", contentType: "application/json-rpc"},
+		{name: "xmlrpc", path: "/rpc", contentType: "text/xml"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatalf("dial raw HTTP: %v", err)
+			}
+			defer conn.Close()
+
+			req := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: 32\r\n\r\n", tc.path, addr, tc.contentType)
+			if _, err := io.WriteString(conn, req); err != nil {
+				t.Fatalf("write oversized request header: %v", err)
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.CloseWrite()
+			}
+
+			conn.SetReadDeadline(time.Now().Add(time.Second))
+			raw, err := io.ReadAll(conn)
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					t.Fatalf("read timed out waiting for connection close")
+				}
+				t.Fatalf("read oversized request response: %v", err)
+			}
+			if len(raw) != 0 {
+				t.Fatalf("expected no HTTP response, got %q", string(raw))
+			}
+		})
+	}
+}
+
+func TestJSONRPCSingleInvalidRequestPreservesID(t *testing.T) {
+	disp := &mockDispatcher{}
+	ts := newTestServer(disp)
+	defer closeTestServer(ts)
+
+	resp := doTestRequest(t, ts.Client(), http.MethodPost, ts.URL+"/jsonrpc", "application/json-rpc", strings.NewReader(`{"jsonrpc":"2.0","id":"bad","params":[]}`))
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	var r jsonrpc.Response
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, string(b))
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", resp.StatusCode, string(b))
+	}
+	if r.Error == nil || r.Error.Code != jsonrpc.ErrCodeInvalidRequest {
+		t.Fatalf("error = %+v, want invalid request", r.Error)
+	}
+	if r.ID != "bad" {
+		t.Fatalf("id = %#v, want %q", r.ID, "bad")
+	}
+}
+
+func TestJSONRPCSingleInvalidParamsPreservesID(t *testing.T) {
+	disp := &mockDispatcher{}
+	ts := newTestServer(disp)
+	defer closeTestServer(ts)
+
+	resp := doTestRequest(t, ts.Client(), http.MethodPost, ts.URL+"/jsonrpc", "application/json-rpc", strings.NewReader(`{"jsonrpc":"2.0","id":"badp","method":"aria2.getVersion","params":{"k":"v"}}`))
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	var r jsonrpc.Response
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, string(b))
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", resp.StatusCode, string(b))
+	}
+	if r.Error == nil || r.Error.Code != jsonrpc.ErrCodeInvalidParams {
+		t.Fatalf("error = %+v, want invalid params", r.Error)
+	}
+	if r.ID != "badp" {
+		t.Fatalf("id = %#v, want %q", r.ID, "badp")
+	}
+}
+
+func TestJSONRPCScalarTopLevelReturnsInvalidRequest(t *testing.T) {
+	disp := &mockDispatcher{}
+	ts := newTestServer(disp)
+	defer closeTestServer(ts)
+
+	resp := doTestRequest(t, ts.Client(), http.MethodPost, ts.URL+"/jsonrpc", "application/json-rpc", strings.NewReader(`"str"`))
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	var r jsonrpc.Response
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, string(b))
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", resp.StatusCode, string(b))
+	}
+	if r.Error == nil || r.Error.Code != jsonrpc.ErrCodeInvalidRequest {
+		t.Fatalf("error = %+v, want invalid request", r.Error)
+	}
+	if r.ID != nil {
+		t.Fatalf("id = %#v, want nil", r.ID)
 	}
 }
 
@@ -444,6 +619,59 @@ func TestJSONPGetUsesRawQueryWithoutQuestionMark(t *testing.T) {
 	}
 }
 
+func TestJSONPGetPreservesRawPercentEncodedID(t *testing.T) {
+	disp := &mockDispatcher{
+		call: func(method string, params []any) (any, error) {
+			if method != "system.listMethods" {
+				return nil, fmt.Errorf("method = %q, want system.listMethods", method)
+			}
+			return []string{"system.listMethods"}, nil
+		},
+	}
+	ts := newTestServer(disp)
+	defer closeTestServer(ts)
+
+	resp := doTestRequest(t, ts.Client(), http.MethodGet, ts.URL+"/jsonrpc?method=system.listMethods&id=a%2Fb", "", nil)
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	var r jsonrpc.Response
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, string(b))
+	}
+	if r.ID != "a%2Fb" {
+		t.Fatalf("id = %#v, want %q", r.ID, "a%2Fb")
+	}
+}
+
+func TestJSONPInvalidBase64ParamsReturnInvalidRequest(t *testing.T) {
+	disp := &mockDispatcher{
+		call: func(method string, params []any) (any, error) {
+			return nil, fmt.Errorf("dispatcher should not be called for invalid JSONP params")
+		},
+	}
+	ts := newTestServer(disp)
+	defer closeTestServer(ts)
+
+	resp := doTestRequest(t, ts.Client(), http.MethodGet, ts.URL+"/jsonrpc?method=system.listMethods&id=x&params=not_base64", "", nil)
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	var r jsonrpc.Response
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, string(b))
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", resp.StatusCode, string(b))
+	}
+	if r.Error == nil || r.Error.Code != jsonrpc.ErrCodeInvalidRequest {
+		t.Fatalf("error = %+v, want invalid request", r.Error)
+	}
+	if r.ID != nil {
+		t.Fatalf("id = %#v, want nil", r.ID)
+	}
+}
+
 // ---- XML-RPC Tests ----
 
 func TestXMLRPCCall(t *testing.T) {
@@ -479,6 +707,56 @@ func TestXMLRPCCall(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(b), "1.37.0") {
 		t.Errorf("response does not contain version: %s", string(b))
+	}
+}
+
+func TestXMLRPCUploadPayloadIsNormalizedOnceForDispatcher(t *testing.T) {
+	rawPayload := []byte("dummy-torrent")
+	encodedPayload := base64.StdEncoding.EncodeToString(rawPayload)
+	disp := &mockDispatcher{
+		call: func(method string, params []any) (any, error) {
+			if method != "aria2.addTorrent" {
+				return nil, fmt.Errorf("method = %q, want aria2.addTorrent", method)
+			}
+			if len(params) != 2 {
+				return nil, fmt.Errorf("params len = %d, want 2", len(params))
+			}
+			if got, want := params[0], "token:secret"; got != want {
+				return nil, fmt.Errorf("token = %#v, want %q", got, want)
+			}
+			if got, want := params[1], encodedPayload; got != want {
+				return nil, fmt.Errorf("payload = %#v, want %q", got, want)
+			}
+			return "ok", nil
+		},
+	}
+	cfg := Config{
+		Listen:         ":0",
+		AllowedOrigins: []string{"*"},
+		Dispatcher:     disp,
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewUnstartedServer(srv.http.Handler)
+	ts.EnableHTTP2 = false
+	ts.Start()
+	defer ts.Close()
+
+	body := `<?xml version="1.0"?><methodCall><methodName>aria2.addTorrent</methodName><params>` +
+		`<param><value><string>token:secret</string></value></param>` +
+		`<param><value><base64>` + encodedPayload + `</base64></value></param>` +
+		`</params></methodCall>`
+	resp, err := http.Post(ts.URL+"/rpc", "text/xml", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, string(b))
 	}
 }
 
@@ -913,6 +1191,84 @@ func TestWebSocketRejectsUnmaskedClientFrame(t *testing.T) {
 	}
 }
 
+func TestWebSocketFragmentedMessagesAreAccumulated(t *testing.T) {
+	cases := []struct {
+		name   string
+		opcode byte
+	}{
+		{name: "text", opcode: opText},
+		{name: "binary", opcode: opBinary},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &mockDispatcher{
+				call: func(method string, params []any) (any, error) {
+					if method != "aria2.getVersion" {
+						return nil, fmt.Errorf("method = %q, want aria2.getVersion", method)
+					}
+					return "1.37.0", nil
+				},
+			}
+			cfg := Config{
+				Listen:         ":0",
+				AllowedOrigins: []string{"*"},
+				Dispatcher:     disp,
+			}
+			srv, err := New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+
+			go func() {
+				_ = srv.http.Serve(ln)
+			}()
+			go srv.broadcastNotifications(ctx)
+
+			conn, reader := openRawWebSocket(t, ln.Addr().String())
+			defer conn.Close()
+
+			payload := []byte(`{"jsonrpc":"2.0","id":"1","method":"aria2.getVersion","params":[]}`)
+			split := len(payload) / 2
+			if err := writeMaskedClientFrameWithFIN(conn, false, tc.opcode, payload[:split]); err != nil {
+				t.Fatalf("write first fragment: %v", err)
+			}
+			if err := writeMaskedClientFrameWithFIN(conn, true, opContinuation, payload[split:]); err != nil {
+				t.Fatalf("write final continuation: %v", err)
+			}
+
+			conn.SetReadDeadline(time.Now().Add(time.Second))
+			got, err := readFramex(reader)
+			if err != nil {
+				t.Fatalf("read fragmented response frame: %v", err)
+			}
+			defer got.free()
+			if got.opcode != opText {
+				t.Fatalf("opcode = 0x%x, want text", got.opcode)
+			}
+			var r jsonrpc.Response
+			if err := json.Unmarshal(got.payload, &r); err != nil {
+				t.Fatalf("unmarshal fragmented ws response: %v; body=%s", err, string(got.payload))
+			}
+			if r.Error != nil {
+				t.Fatalf("unexpected error: %+v", r.Error)
+			}
+			if r.Result != "1.37.0" {
+				t.Fatalf("result = %#v, want %q", r.Result, "1.37.0")
+			}
+		})
+	}
+}
+
 func TestWebSocketSystemListMethodsAreAuthless(t *testing.T) {
 	disp := &mockDispatcher{
 		call: func(method string, params []any) (any, error) {
@@ -970,6 +1326,148 @@ func TestWebSocketSystemListMethodsAreAuthless(t *testing.T) {
 	}
 	if r.Error != nil {
 		t.Fatalf("unexpected error: %+v", r.Error)
+	}
+}
+
+func TestWebSocketBatchMixedInvalidEntries(t *testing.T) {
+	disp := &mockDispatcher{
+		call: func(method string, params []any) (any, error) {
+			if method != "aria2.getVersion" {
+				return nil, fmt.Errorf("method = %q, want aria2.getVersion", method)
+			}
+			return "1.37.0", nil
+		},
+	}
+	cfg := Config{
+		Listen:         ":0",
+		AllowedOrigins: []string{"*"},
+		Dispatcher:     disp,
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		_ = srv.http.Serve(ln)
+	}()
+	go srv.broadcastNotifications(ctx)
+
+	conn, reader := openRawWebSocket(t, ln.Addr().String())
+	defer conn.Close()
+
+	payload := []byte(`[
+		{"jsonrpc":"2.0","id":"ok","method":"aria2.getVersion","params":[]},
+		{"jsonrpc":"2.0","id":"bad","params":[]}
+	]`)
+	if err := writeMaskedClientFrame(conn, opText, payload); err != nil {
+		t.Fatalf("write masked frame: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	got, err := readFramex(reader)
+	if err != nil {
+		t.Fatalf("read response frame: %v", err)
+	}
+	defer got.free()
+	if got.opcode != opText {
+		t.Fatalf("opcode = 0x%x, want text", got.opcode)
+	}
+	var batch []jsonrpc.Response
+	if err := json.Unmarshal(got.payload, &batch); err != nil {
+		t.Fatalf("unmarshal ws batch: %v; body=%s", err, string(got.payload))
+	}
+	if len(batch) != 2 {
+		t.Fatalf("len(batch) = %d, want 2", len(batch))
+	}
+	if batch[0].Error != nil || batch[0].Result != "1.37.0" {
+		t.Fatalf("batch[0] = %+v, want success result", batch[0])
+	}
+	if batch[1].Error == nil || batch[1].Error.Code != jsonrpc.ErrCodeInvalidRequest {
+		t.Fatalf("batch[1] = %+v, want invalid request error", batch[1])
+	}
+	if batch[1].ID != "bad" {
+		t.Fatalf("batch[1].id = %#v, want %q", batch[1].ID, "bad")
+	}
+}
+
+func TestWebSocketBatchMissingIDReturnsInvalidRequest(t *testing.T) {
+	disp := &mockDispatcher{
+		call: func(method string, params []any) (any, error) {
+			if method != "aria2.getVersion" {
+				return nil, fmt.Errorf("method = %q, want aria2.getVersion", method)
+			}
+			return "1.37.0", nil
+		},
+	}
+	cfg := Config{
+		Listen:         ":0",
+		AllowedOrigins: []string{"*"},
+		Dispatcher:     disp,
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		_ = srv.http.Serve(ln)
+	}()
+	go srv.broadcastNotifications(ctx)
+
+	conn, reader := openRawWebSocket(t, ln.Addr().String())
+	defer conn.Close()
+
+	payload := []byte(`[
+		{"jsonrpc":"2.0","id":"ok","method":"aria2.getVersion","params":[]},
+		{"jsonrpc":"2.0","method":"aria2.getVersion","params":[]}
+	]`)
+	if err := writeMaskedClientFrame(conn, opText, payload); err != nil {
+		t.Fatalf("write masked frame: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	got, err := readFramex(reader)
+	if err != nil {
+		t.Fatalf("read response frame: %v", err)
+	}
+	defer got.free()
+	if got.opcode != opText {
+		t.Fatalf("opcode = 0x%x, want text", got.opcode)
+	}
+	var batch []jsonrpc.Response
+	if err := json.Unmarshal(got.payload, &batch); err != nil {
+		t.Fatalf("unmarshal ws batch: %v; body=%s", err, string(got.payload))
+	}
+	if len(batch) != 2 {
+		t.Fatalf("len(batch) = %d, want 2", len(batch))
+	}
+	if batch[0].Error != nil || batch[0].Result != "1.37.0" {
+		t.Fatalf("batch[0] = %+v, want success result", batch[0])
+	}
+	if batch[1].Error == nil || batch[1].Error.Code != jsonrpc.ErrCodeInvalidRequest {
+		t.Fatalf("batch[1] = %+v, want invalid request error", batch[1])
+	}
+	if batch[1].ID != nil {
+		t.Fatalf("batch[1].id = %#v, want nil", batch[1].ID)
 	}
 }
 
@@ -1299,8 +1797,15 @@ func openRawWebSocket(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
 }
 
 func writeMaskedClientFrame(w io.Writer, opcode byte, payload []byte) error {
+	return writeMaskedClientFrameWithFIN(w, true, opcode, payload)
+}
+
+func writeMaskedClientFrameWithFIN(w io.Writer, fin bool, opcode byte, payload []byte) error {
 	header := make([]byte, 2, 10)
-	header[0] = 0x80 | (opcode & 0x0F)
+	header[0] = opcode & 0x0F
+	if fin {
+		header[0] |= 0x80
+	}
 	length := len(payload)
 	switch {
 	case length <= 125:

@@ -18,6 +18,16 @@ const testMetalinkV4 = `<?xml version="1.0" encoding="UTF-8"?>
   </file>
 </metalink>`
 
+const testMetalinkMultiFile = `<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="a.bin">
+    <url>http://example.com/a.bin</url>
+  </file>
+  <file name="b.bin">
+    <url>http://example.com/b.bin</url>
+  </file>
+</metalink>`
+
 func testOpts() *config.Options {
 	cfg := config.Default()
 	cfg.Dir = "/tmp/aria2go-test"
@@ -97,12 +107,36 @@ func TestAddMetalink(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	gid, err := d.AddMetalink([]byte(testMetalinkV4), nil)
+	gids, err := d.AddMetalink([]byte(testMetalinkV4), nil)
 	if err != nil {
 		t.Fatalf("AddMetalink() error = %v", err)
 	}
-	if gid == 0 {
+	if len(gids) != 1 {
+		t.Fatalf("len(gids) = %d, want 1", len(gids))
+	}
+	if gids[0] == 0 {
 		t.Error("AddMetalink() returned zero GID")
+	}
+}
+
+func TestAddMetalink_MultiFileReturnsMultipleGIDs(t *testing.T) {
+	d, err := New(Config{Options: testOpts()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	gids, err := d.AddMetalink([]byte(testMetalinkMultiFile), nil)
+	if err != nil {
+		t.Fatalf("AddMetalink() error = %v", err)
+	}
+	if len(gids) != 2 {
+		t.Fatalf("len(gids) = %d, want 2", len(gids))
+	}
+	if gids[0] == 0 || gids[1] == 0 {
+		t.Fatalf("AddMetalink() returned zero gid(s): %v", gids)
+	}
+	if gids[0] == gids[1] {
+		t.Fatalf("AddMetalink() returned duplicate gids: %v", gids)
 	}
 }
 

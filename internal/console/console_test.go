@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNew(t *testing.T) {
@@ -304,7 +305,7 @@ func TestRenderCompactOverflow(t *testing.T) {
 
 func TestRenderSummary(t *testing.T) {
 	var buf bytes.Buffer
-	c := &Console{out: &buf, opts: Options{Summary: true, NoColor: true}}
+	c := &Console{out: &buf, opts: Options{SummaryInterval: time.Minute, NoColor: true}}
 	s := DownloadStat{
 		GID:           "cccc333344445555",
 		Status:        "active",
@@ -332,7 +333,7 @@ func TestRenderSummary(t *testing.T) {
 
 func TestRenderSummaryNonTTYNeverUsesColors(t *testing.T) {
 	var buf bytes.Buffer
-	c := &Console{out: &buf, opts: Options{Summary: true, NoColor: false}}
+	c := &Console{out: &buf, opts: Options{SummaryInterval: time.Minute, NoColor: false}}
 	s := DownloadStat{
 		GID:           "cccc333344445555",
 		Status:        "active",
@@ -345,6 +346,102 @@ func TestRenderSummaryNonTTYNeverUsesColors(t *testing.T) {
 	c.Render([]DownloadStat{s})
 	if out := buf.String(); strings.Contains(out, "\033[") {
 		t.Errorf("summary on non-TTY should not contain ANSI escapes, got: %q", out)
+	}
+}
+
+func TestRenderSummaryWhenReadoutHidden(t *testing.T) {
+	var buf bytes.Buffer
+	c := &Console{out: &buf, opts: Options{
+		SummaryInterval: time.Minute,
+		ShowReadout:     false,
+		ShowReadoutSet:  true,
+		NoColor:         true,
+	}}
+	c.Render([]DownloadStat{{
+		GID:           "cccc333344445555",
+		Status:        "active",
+		Speed:         1024,
+		TotalSize:     4096,
+		CompletedSize: 1024,
+		Filename:      "test.file",
+		Connections:   2,
+	}})
+	out := buf.String()
+	if !strings.Contains(out, "Download Progress Summary as of") {
+		t.Fatalf("summary should still render when readout is hidden, got: %q", out)
+	}
+}
+
+func TestRenderNoSummaryWhenIntervalZero(t *testing.T) {
+	var buf bytes.Buffer
+	c := &Console{out: &buf, opts: Options{
+		SummaryInterval: 0,
+		ShowReadout:     false,
+		ShowReadoutSet:  true,
+		NoColor:         true,
+	}}
+	c.Render([]DownloadStat{{
+		GID:           "cccc333344445555",
+		Status:        "active",
+		Speed:         1024,
+		TotalSize:     4096,
+		CompletedSize: 1024,
+		Filename:      "test.file",
+		Connections:   2,
+	}})
+	if got := buf.String(); got != "" {
+		t.Fatalf("summary-interval=0 with hidden readout should produce no output, got: %q", got)
+	}
+}
+
+func TestRenderSummaryIntervalRespectedAcrossRenders(t *testing.T) {
+	var buf bytes.Buffer
+	c := &Console{out: &buf, opts: Options{
+		SummaryInterval: 3 * time.Second,
+		ShowReadout:     false,
+		ShowReadoutSet:  true,
+		NoColor:         true,
+	}}
+	snap := DownloadStat{
+		GID:           "cccc333344445555",
+		Status:        "active",
+		Speed:         1024,
+		TotalSize:     4096,
+		CompletedSize: 1024,
+		Filename:      "test.file",
+		Connections:   2,
+	}
+
+	c.Render([]DownloadStat{snap})
+	if got := strings.Count(buf.String(), "Download Progress Summary as of"); got != 1 {
+		t.Fatalf("first render summary count = %d, want 1", got)
+	}
+
+	buf.Reset()
+	c.lastUpdate = time.Now().Add(-2 * time.Second)
+	c.lastSummary = time.Now().Add(-2 * time.Second)
+	c.Render([]DownloadStat{snap})
+	if strings.Contains(buf.String(), "Download Progress Summary as of") {
+		t.Fatalf("summary rendered before interval elapsed: %q", buf.String())
+	}
+
+	buf.Reset()
+	c.lastUpdate = time.Now().Add(-2 * time.Second)
+	c.lastSummary = time.Now().Add(-4 * time.Second)
+	c.Render([]DownloadStat{snap})
+	if got := strings.Count(buf.String(), "Download Progress Summary as of"); got != 1 {
+		t.Fatalf("summary count after interval elapsed = %d, want 1", got)
+	}
+}
+
+func TestTruncateANSI(t *testing.T) {
+	in := "\033[35m[#abcdef 123456789]\033[0m"
+	out := truncateANSI(in, 10)
+	if stripColors(out) != "[#abcdef 1" {
+		t.Fatalf("stripColors(truncateANSI(...)) = %q, want %q", stripColors(out), "[#abcdef 1")
+	}
+	if !strings.HasSuffix(out, clrClear) {
+		t.Fatalf("truncateANSI should preserve/reset color state, got %q", out)
 	}
 }
 

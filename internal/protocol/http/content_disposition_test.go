@@ -147,3 +147,23 @@ func TestISO88591ToUTF8(t *testing.T) {
 		}
 	}
 }
+
+func TestParseContentDispositionDefaultUTF8Option(t *testing.T) {
+	header := "attachment; filename=\"caf\xc3\xa9.txt\""
+
+	got, ok := ParseContentDispositionWithOptions(header, false)
+	if !ok {
+		t.Fatal("ParseContentDispositionWithOptions(defaultUTF8=false) returned ok=false")
+	}
+	if got != "cafÃ©.txt" {
+		t.Fatalf("defaultUTF8=false filename = %q, want %q", got, "cafÃ©.txt")
+	}
+
+	got, ok = ParseContentDispositionWithOptions(header, true)
+	if !ok {
+		t.Fatal("ParseContentDispositionWithOptions(defaultUTF8=true) returned ok=false")
+	}
+	if got != "café.txt" {
+		t.Fatalf("defaultUTF8=true filename = %q, want %q", got, "café.txt")
+	}
+}

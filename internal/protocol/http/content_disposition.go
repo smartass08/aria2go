@@ -30,13 +30,22 @@ const (
 	cdExtPct2
 )
 
-// ParseContentDisposition parses a Content-Disposition header value per
-// RFC 6266 and extracts the filename parameter. It handles both the
+// ParseContentDisposition parses a Content-Disposition header value using
+// UTF-8 as the default charset for plain filename parameters.
+func ParseContentDisposition(header string) (filename string, ok bool) {
+	return ParseContentDispositionWithOptions(header, true)
+}
+
+// ParseContentDispositionWithOptions parses a Content-Disposition header value
+// per RFC 6266 and extracts the filename parameter. It handles both the
 // 'filename' parameter (token or quoted-string) and the 'filename*'
 // parameter with RFC 5987 encoding (charset'language'percent-encoded-value).
-// Path separators are stripped (only the basename is returned). Returns
-// empty string and false if no valid filename is found.
-func ParseContentDisposition(header string) (filename string, ok bool) {
+// Path separators are stripped (only the basename is returned). When
+// defaultUTF8 is false, plain filename parameters are interpreted as
+// ISO-8859-1 bytes to match aria2's default
+// --content-disposition-default-utf8=false behavior. Returns empty string and
+// false if no valid filename is found.
+func ParseContentDispositionWithOptions(header string, defaultUTF8 bool) (filename string, ok bool) {
 	s := cdBeforeType
 	var paramNameStart, paramNameEnd int
 	var filenameCharset string
@@ -272,8 +281,9 @@ func ParseContentDisposition(header string) (filename string, ok bool) {
 
 	filename = sb.String()
 
-	// Convert iso-8859-1 charset to UTF-8
-	if filenameCharset == "iso-8859-1" {
+	// aria2 treats plain filename parameters as ISO-8859-1 unless
+	// --content-disposition-default-utf8=true is enabled.
+	if filenameCharset == "iso-8859-1" || (filenameCharset == "" && !defaultUTF8) {
 		filename = iso88591ToUTF8(filename)
 	}
 

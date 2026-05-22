@@ -72,6 +72,7 @@ const (
 	sftpAttrSize      = 0x00000001
 	sftpAttrPerms     = 0x00000004
 	sftpAttrACModTime = 0x00000008
+	sftpFixtureMTime  = 1_700_000_000
 )
 
 type sftpAuthAttempt struct {
@@ -1092,8 +1093,8 @@ func sftpAttrs(id uint32, size int64) []byte {
 	attrs = binary.BigEndian.AppendUint32(attrs, sftpAttrSize|sftpAttrPerms|sftpAttrACModTime)
 	attrs = binary.BigEndian.AppendUint64(attrs, uint64(size))
 	attrs = binary.BigEndian.AppendUint32(attrs, 0o100644)
-	attrs = binary.BigEndian.AppendUint32(attrs, 1_700_000_000)
-	attrs = binary.BigEndian.AppendUint32(attrs, 1_700_000_000)
+	attrs = binary.BigEndian.AppendUint32(attrs, sftpFixtureMTime)
+	attrs = binary.BigEndian.AppendUint32(attrs, sftpFixtureMTime)
 
 	body := []byte{sftpFXPAttrs}
 	body = binary.BigEndian.AppendUint32(body, id)

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>aria2go bench</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>aria2go vs aria2c <span id="status" class="status idling">idling</span></h1>
+  <div class="meta">
+    <span>aria2c: <b id="ver-aria2c">-</b></span>
+    <span>aria2go: <b id="ver-aria2go">-</b></span>
+    <span>host: <b id="host">-</b></span>
+    <span>elapsed: <b id="elapsed">00:00</b></span>
+  </div>
+</header>
+
+<section class="current">
+  <h2>Current scenario</h2>
+  <div id="scenario" class="scenario-box">
+    <div class="tag" id="sc-kind">-</div>
+    <div class="tag" id="sc-binary">-</div>
+    <div class="tag" id="sc-progress">0 / 0 active</div>
+  </div>
+</section>
+
+<section class="grids">
+  <div class="chart-card">
+    <h3>CPU % (user)</h3>
+    <canvas id="chart-cpu"></canvas>
+  </div>
+  <div class="chart-card">
+    <h3>Memory (RSS)</h3>
+    <canvas id="chart-rss"></canvas>
+  </div>
+  <div class="chart-card">
+    <h3>Threads</h3>
+    <canvas id="chart-threads"></canvas>
+  </div>
+  <div class="chart-card">
+    <h3>Open FDs</h3>
+    <canvas id="chart-fds"></canvas>
+  </div>
+</section>
+
+<section class="summary">
+  <h2>Completed scenarios</h2>
+  <table id="summary-table">
+    <thead>
+      <tr>
+        <th>Scenario</th><th>Binary</th><th>Duration</th>
+        <th>CPU user (mean)</th><th>CPU sys (mean)</th>
+        <th>RSS peak</th><th>Throughput</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

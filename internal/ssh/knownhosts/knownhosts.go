@@ -1,214 +1,230 @@
-// Package knownhosts provides a parser for the OpenSSH known_hosts file
-// format (~/.ssh/known_hosts) and a HostKey callback for SSH host key
-// verification.
-//
-// In aria2, libssh2 provides knownhosts checking through
-// libssh2_knownhost_checkp(). This package replicates that behavior by
-// parsing the OpenSSH known_hosts format and matching host keys during
-// SSH transport layer setup.
-//
-// OpenSSH known_hosts format:
-//   - One entry per line.
-//   - Lines starting with '#' are comments and empty lines are skipped.
-//   - Each entry has the form: hostnames key-type base64-key [comment]
-//   - hostnames can be comma-separated; each may contain wildcards (* and ?).
-//   - Optional markers: @cert-authority, @revoked at the start of a line.
-//   - Key types: ssh-rsa, ssh-dss, ecdsa-sha2-nistp256,
-//     ecdsa-sha2-nistp384, ecdsa-sha2-nistp521, ssh-ed25519.
-//   - Hashed hostnames (starting with '|1|') are not yet supported.
+// Package knownhosts provides a lenient known_hosts parser and callback for
+// SFTP host-key verification.
 package knownhosts
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
+	"strconv"
 	"strings"
+
+	xssh "golang.org/x/crypto/ssh"
 )
 
-// ErrNoMatch is returned when no matching host key is found.
-var ErrNoMatch = fmt.Errorf("knownhosts: no matching host key")
+var (
+	ErrNoMatch     = errors.New("knownhosts: no matching host key")
+	ErrKeyMismatch = errors.New("knownhosts: host key mismatch")
+	ErrRevoked     = errors.New("knownhosts: revoked host key")
+)
 
-// Entry represents a single known_hosts entry.
-type Entry struct {
-	Hostnames []string
-	KeyType   string
-	Key       []byte
-	Comment   string
-	Marker    string
-}
-
-// HostKeyCallback is the signature for host key verification callbacks.
-// It receives the hostname, remote address, key type, and the raw
-// public key bytes. It returns nil if the key is trusted, or an error
-// if verification fails.
+// HostKeyCallback verifies a host key blob against parsed known_hosts entries.
 type HostKeyCallback func(hostname string, remote netAddr, keyType string, key []byte) error
 
-// netAddr abstracts the address interface accepted by the callback.
 type netAddr interface {
 	Network() string
 	String() string
 }
 
-// File represents a parsed known_hosts file.
+// Entry is a single known_hosts line.
+type Entry struct {
+	Marker  string
+	Hosts   []string
+	KeyType string
+	Key     []byte
+}
+
+// File holds parsed known_hosts entries.
 type File struct {
 	entries []Entry
 }
 
-// Parse parses the contents of a known_hosts file.
-// Lines starting with '#' are treated as comments. Empty lines are skipped.
-// Entries with hashed hostnames (starting with '|1|') are ignored.
+// New loads a known_hosts file from path.
+func New(path string) (HostKeyCallback, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	file, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	return NewHostKeyCallback(file), nil
+}
+
+// Parse parses known_hosts contents, ignoring malformed lines to match the
+// repository's existing lenient behavior.
 func Parse(data []byte) (*File, error) {
 	var entries []Entry
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		entry, err := parseLine(line)
+	for len(data) > 0 {
+		marker, hosts, pubKey, _, rest, err := xssh.ParseKnownHosts(data)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			_, rest = consumeLine(data)
+			data = rest
 			continue
 		}
-		entries = append(entries, *entry)
+		entries = append(entries, Entry{
+			Marker:  marker,
+			Hosts:   append([]string(nil), hosts...),
+			KeyType: pubKey.Type(),
+			Key:     append([]byte(nil), pubKey.Marshal()...),
+		})
+		data = rest
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("%w: no entries parsed", ErrNoMatch)
+		return nil, ErrNoMatch
 	}
 	return &File{entries: entries}, nil
 }
 
-func parseLine(line string) (*Entry, error) {
-	entry := &Entry{}
-
-	rest := line
-	if strings.HasPrefix(rest, "@cert-authority ") {
-		entry.Marker = "cert-authority"
-		rest = rest[len("@cert-authority "):]
-	} else if strings.HasPrefix(rest, "@revoked ") {
-		entry.Marker = "revoked"
-		rest = rest[len("@revoked "):]
+func consumeLine(data []byte) ([]byte, []byte) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return data[:i], data[i+1:]
 	}
-
-	if strings.HasPrefix(rest, "|1|") {
-		return nil, fmt.Errorf("knownhosts: hashed hostnames not supported")
-	}
-
-	fields := splitFields(rest)
-	if len(fields) < 3 {
-		return nil, fmt.Errorf("knownhosts: malformed entry")
-	}
-
-	entry.Hostnames = strings.Split(fields[0], ",")
-	entry.KeyType = fields[1]
-	entry.Key = []byte(fields[2])
-	if len(fields) > 3 {
-		entry.Comment = fields[3]
-	}
-
-	return entry, nil
+	return data, nil
 }
 
-func splitFields(s string) []string {
-	var fields []string
-	inQuote := false
-	current := strings.Builder{}
-	for _, c := range s {
-		if c == '"' {
-			inQuote = !inQuote
-			continue
-		}
-		if c == ' ' || c == '\t' {
-			if inQuote {
-				current.WriteRune(c)
-			} else if current.Len() > 0 {
-				fields = append(fields, current.String())
-				current.Reset()
+// KeyType returns the SSH key format encoded in hostKeyBlob.
+func KeyType(hostKeyBlob []byte) (string, error) {
+	pubKey, err := xssh.ParsePublicKey(hostKeyBlob)
+	if err != nil {
+		return "", err
+	}
+	return pubKey.Type(), nil
+}
+
+// HostPort formats host and port using OpenSSH's bracket rules.
+func HostPort(host string, port int) string {
+	if port == 22 || port == 0 {
+		return strings.Trim(host, "[]")
+	}
+	host = strings.Trim(host, "[]")
+	return "[" + host + "]:" + strconv.Itoa(port)
+}
+
+// NewHostKeyCallback builds a host-key verifier over the parsed file.
+func NewHostKeyCallback(f *File) HostKeyCallback {
+	return func(hostname string, _ netAddr, keyType string, key []byte) error {
+		hostname = normalizeHost(hostname)
+		var sawHost bool
+		for _, entry := range f.entries {
+			if !matchPatterns(entry.Hosts, hostname) {
+				continue
 			}
-		} else {
-			current.WriteRune(c)
+			sawHost = true
+			if entry.Marker == "revoked" {
+				if entry.KeyType == keyType && bytes.Equal(entry.Key, key) {
+					return fmt.Errorf("%w for %s", ErrRevoked, hostname)
+				}
+				continue
+			}
+			if entry.KeyType == keyType && bytes.Equal(entry.Key, key) {
+				return nil
+			}
 		}
+		if sawHost {
+			return fmt.Errorf("%w for %s (%s)", ErrKeyMismatch, hostname, keyType)
+		}
+		return fmt.Errorf("%w for %s", ErrNoMatch, hostname)
 	}
-	if current.Len() > 0 {
-		fields = append(fields, current.String())
-	}
-	return fields
 }
 
-// Lookup searches for a host key matching the given hostname and key type.
-// Returns the matching Entry, or nil if no match is found.
-func (f *File) Lookup(hostname string, keyType string) *Entry {
-	for i := range f.entries {
-		e := &f.entries[i]
-		if e.KeyType != keyType {
-			continue
-		}
-		if matchHostname(e.Hostnames, hostname) {
-			return e
-		}
-	}
-	return nil
-}
-
-func matchHostname(patterns []string, hostname string) bool {
+func matchPatterns(patterns []string, hostname string) bool {
+	matched := false
 	for _, pattern := range patterns {
-		if pattern == hostname {
-			return true
+		negate := strings.HasPrefix(pattern, "!")
+		if negate {
+			pattern = pattern[1:]
 		}
-		if matchWildcard(pattern, hostname) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchWildcard(pattern, hostname string) bool {
-	if !strings.ContainsRune(pattern, '*') && !strings.ContainsRune(pattern, '?') {
-		return false
-	}
-	parts := splitWildcard(pattern)
-	rest := hostname
-	for _, part := range parts {
-		if part == "" {
+		if !matchPattern(pattern, hostname) {
 			continue
 		}
-		if part == "*" {
-			continue
-		}
-		idx := strings.Index(rest, part)
-		if idx < 0 {
+		if negate {
 			return false
 		}
-		rest = rest[idx+len(part):]
+		matched = true
 	}
-	return true
+	return matched
 }
 
-func splitWildcard(s string) []string {
-	var parts []string
-	current := strings.Builder{}
-	for _, c := range s {
-		if c == '*' || c == '?' {
-			if current.Len() > 0 {
-				parts = append(parts, current.String())
-				current.Reset()
+func matchPattern(pattern, hostname string) bool {
+	if strings.HasPrefix(pattern, "|1|") {
+		return matchHashedHost(pattern, hostname)
+	}
+	return wildcardMatch([]byte(pattern), []byte(hostname))
+}
+
+func matchHashedHost(pattern, hostname string) bool {
+	parts := strings.Split(pattern, "|")
+	if len(parts) != 4 || parts[1] != "1" {
+		return false
+	}
+	salt, err := base64.StdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	want, err := base64.StdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha1.New, salt)
+	mac.Write([]byte(normalizeHost(hostname)))
+	return hmac.Equal(mac.Sum(nil), want)
+}
+
+func normalizeHost(hostname string) string {
+	if host, port, err := net.SplitHostPort(hostname); err == nil {
+		host = strings.Trim(host, "[]")
+		if port == "22" {
+			return host
+		}
+		return "[" + host + "]:" + port
+	}
+	return strings.Trim(hostname, "[]")
+}
+
+func wildcardMatch(pattern, s []byte) bool {
+	for {
+		if len(pattern) == 0 {
+			return len(s) == 0
+		}
+		if len(s) == 0 {
+			for _, b := range pattern {
+				if b != '*' {
+					return false
+				}
 			}
-			parts = append(parts, string(c))
-		} else {
-			current.WriteRune(c)
+			return true
 		}
-	}
-	if current.Len() > 0 {
-		parts = append(parts, current.String())
-	}
-	return parts
-}
-
-// NewHostKeyCallback creates a HostKeyCallback from a parsed known_hosts File.
-// The callback checks incoming host keys against the entries in the file.
-func NewHostKeyCallback(f *File) HostKeyCallback {
-	return func(hostname string, remote netAddr, keyType string, key []byte) error {
-		entry := f.Lookup(hostname, keyType)
-		if entry == nil {
-			return fmt.Errorf("knownhosts: %w for host %q type %q", ErrNoMatch, hostname, keyType)
+		switch pattern[0] {
+		case '*':
+			if len(pattern) == 1 {
+				return true
+			}
+			for i := range s {
+				if wildcardMatch(pattern[1:], s[i:]) {
+					return true
+				}
+			}
+			return false
+		case '?':
+			pattern = pattern[1:]
+			s = s[1:]
+		default:
+			if pattern[0] != s[0] {
+				return false
+			}
+			pattern = pattern[1:]
+			s = s[1:]
 		}
-		return nil
 	}
 }

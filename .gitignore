@@ -18,6 +18,9 @@
 /manifest-lint
 /tracking-render
 /cmd/aria2go/aria2go
+/aria2-bench
+/aria2bench
+/bench/aria2-bench
 /plans/tools/genfixtures/genfixtures
 /plans/tools/orchestrator/adr-check/adr-check
 /plans/tools/orchestrator/claim-sweep/claim-sweep
@@ -56,6 +59,12 @@ suppressions/
 # Local reference checkout and generated fixture state
 /source-truth/
 /test/benchmark/var/
+/test/conformance/stopped-change-option-impl
+/test/conformance/stopped-change-option-impl.aria2
+/test/conformance/stopped-change-option-ref
+/test/conformance/stopped-change-option-ref.aria2
+/active-ref
+/active-ref.aria2
 
 # Local planning / prompt documents
 /AGENTS.md
@@ -66,6 +75,7 @@ suppressions/
 /NOTICE.md
 /PROMPT_TEMPLATES.md
 /we-want-to-rewrite-fancy-glade.md
+/docs/superpowers/
 /plans/local/
 /plans/superpowers/
 

@@ -187,6 +187,12 @@ func TestParseConfAccumulativeDHTEntryPoint(t *testing.T) {
 	if len(o.DHTEntryPoint) != 2 {
 		t.Fatalf("DHTEntryPoint len = %d, want 2", len(o.DHTEntryPoint))
 	}
+	if o.DHTEntryPointHost != "host2" {
+		t.Fatalf("DHTEntryPointHost = %q, want host2", o.DHTEntryPointHost)
+	}
+	if o.DHTEntryPointPort != "6882" {
+		t.Fatalf("DHTEntryPointPort = %q, want 6882", o.DHTEntryPointPort)
+	}
 }
 
 func TestParseConfMultipleEqualsInValue(t *testing.T) {
@@ -396,7 +402,7 @@ func TestParseConfBTExcludeTrackerAccumulative(t *testing.T) {
 }
 
 func TestParseConfDHTEntryPoint6Accumulative(t *testing.T) {
-	input := "dht-entry-point6=host1:6881\ndht-entry-point6=host2:6882\n"
+	input := "dht-entry-point6=[::1]:6881\ndht-entry-point6=[::2]:6882\n"
 	var o Options
 	err := ParseConf(strings.NewReader(input), &o)
 	if err != nil {
@@ -404,6 +410,12 @@ func TestParseConfDHTEntryPoint6Accumulative(t *testing.T) {
 	}
 	if len(o.DHTEntryPoint6) != 2 {
 		t.Fatalf("DHTEntryPoint6 len = %d, want 2", len(o.DHTEntryPoint6))
+	}
+	if o.DHTEntryPointHost6 != "::2" {
+		t.Fatalf("DHTEntryPointHost6 = %q, want ::2", o.DHTEntryPointHost6)
+	}
+	if o.DHTEntryPointPort6 != "6882" {
+		t.Fatalf("DHTEntryPointPort6 = %q, want 6882", o.DHTEntryPointPort6)
 	}
 }
 

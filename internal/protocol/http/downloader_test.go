@@ -1,6 +1,8 @@
 package http_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -9,11 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/smartass08/aria2go/internal/hash"
 	"github.com/smartass08/aria2go/internal/netx"
 	pkghttp "github.com/smartass08/aria2go/internal/protocol/http"
 	"github.com/smartass08/aria2go/internal/tlsx"
@@ -177,6 +182,110 @@ func TestProbeHEADNoContentLength(t *testing.T) {
 	}
 	if size != 4096 {
 		t.Errorf("size = %d, want 4096", size)
+	}
+}
+
+func TestProbeInflatedContentEncodingReturnsUnknownSizeNoRanges(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", "128")
+		w.Header().Set("Accept-Ranges", "bytes")
+		if r.Method == http.MethodHead {
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	d := pkghttp.NewDriver(pkghttp.Opts{
+		Dialer:         newDialer(),
+		Timeout:        10 * time.Second,
+		UseHead:        true,
+		AcceptEncoding: "deflate, gzip",
+	})
+	defer d.Close()
+
+	size, _, acceptsRanges, _, err := d.Probe(context.Background(), srv.URL+"/file.bin")
+	if err != nil {
+		t.Fatalf("Probe error: %v", err)
+	}
+	if size != 0 {
+		t.Fatalf("size = %d, want 0 for inflated content-encoding", size)
+	}
+	if acceptsRanges {
+		t.Fatal("acceptsRanges = true, want false for inflated content-encoding")
+	}
+}
+
+func TestProbeInflatedContentEncodingWithoutUseHeadReusesSingleGET(t *testing.T) {
+	payload := []byte("inflated response payload")
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write(payload); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	var mu sync.Mutex
+	var methods []string
+	var ranges []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		ranges = append(ranges, r.Header.Get("Range"))
+		mu.Unlock()
+
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(compressed.Len()))
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(compressed.Bytes())
+	}))
+	defer srv.Close()
+
+	d := pkghttp.NewDriver(pkghttp.Opts{
+		Dialer:         newDialer(),
+		Timeout:        10 * time.Second,
+		AcceptEncoding: "deflate, gzip",
+	})
+	defer d.Close()
+
+	size, _, acceptsRanges, _, err := d.Probe(context.Background(), srv.URL+"/file.bin")
+	if err != nil {
+		t.Fatalf("Probe error: %v", err)
+	}
+	if size != 0 {
+		t.Fatalf("size = %d, want 0 for inflated content-encoding", size)
+	}
+	if acceptsRanges {
+		t.Fatal("acceptsRanges = true, want false for inflated content-encoding")
+	}
+
+	rc, err := d.Download(context.Background(), srv.URL+"/file.bin", 0, 0)
+	if err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	defer rc.Close()
+
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != string(payload) {
+		t.Fatalf("body = %q, want %q", body, payload)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(methods) != 1 || methods[0] != http.MethodGet {
+		t.Fatalf("methods = %v, want [GET]", methods)
+	}
+	if len(ranges) != 1 || ranges[0] != "" {
+		t.Fatalf("ranges = %v, want [\"\"]", ranges)
 	}
 }
 
@@ -939,6 +1048,79 @@ func TestDownloadResumeRangeIgnoredReturnsError(t *testing.T) {
 	}
 	if !errors.Is(err, pkghttp.ErrRangeIgnored) {
 		t.Fatalf("Download error = %v, want ErrRangeIgnored", err)
+	}
+}
+
+func TestDownloadRangedInflatedContentEncodingReturnsErrRangeIgnored(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "bytes=50-" {
+			t.Errorf("expected Range: bytes=50-, got %q", r.Header.Get("Range"))
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Range", "bytes 50-57/100")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write([]byte("not-used"))
+	}))
+	defer srv.Close()
+
+	d := pkghttp.NewDriver(pkghttp.Opts{
+		Dialer:         newDialer(),
+		Timeout:        10 * time.Second,
+		AcceptEncoding: "deflate, gzip",
+	})
+	defer d.Close()
+
+	rc, err := d.Download(context.Background(), srv.URL+"/file.bin", 50, 0)
+	if err == nil {
+		rc.Close()
+		t.Fatal("Download returned nil error for ranged inflated response")
+	}
+	if !errors.Is(err, pkghttp.ErrRangeIgnored) {
+		t.Fatalf("Download error = %v, want ErrRangeIgnored", err)
+	}
+}
+
+func TestDownloadHTTPProxyUsesAbsoluteFormForHTTP(t *testing.T) {
+	origin := httptest.NewServer(http.NotFoundHandler())
+	defer origin.Close()
+
+	var gotRequestURI atomic.Value
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI.Store(r.RequestURI)
+		if r.Method != http.MethodGet {
+			t.Errorf("proxy method = %s, want GET", r.Method)
+		}
+		_, _ = w.Write([]byte("proxied"))
+	}))
+	defer proxy.Close()
+
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	d := pkghttp.NewDriver(pkghttp.Opts{
+		Dialer:   newDialer(),
+		ProxyURL: proxyURL,
+		Timeout:  10 * time.Second,
+	})
+	defer d.Close()
+
+	rc, err := d.Download(context.Background(), origin.URL+"/file.bin", 0, 0)
+	if err != nil {
+		t.Fatalf("Download via proxy: %v", err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "proxied" {
+		t.Fatalf("body = %q, want proxied", body)
+	}
+	got, _ := gotRequestURI.Load().(string)
+	want := origin.URL + "/file.bin"
+	if got != want {
+		t.Fatalf("proxy RequestURI = %q, want absolute-form %q", got, want)
 	}
 }
 
@@ -2286,8 +2468,19 @@ func TestMetalinkHttpEntriesLinkHeader(t *testing.T) {
 // ---- Digest response header parsing (C++: testGetDigest) ----
 
 func TestDigestResponseHeaderParsing(t *testing.T) {
-	// C++ parses Digest headers with SHA-1, SHA-224, SHA-256 base64 checksums.
-	// Go server returns them; we verify the headers are received.
+	wantSHA1, err := base64.StdEncoding.DecodeString("82AD8itGL/oYQ5BTPFANiYnp9oE=")
+	if err != nil {
+		t.Fatalf("DecodeString(SHA-1): %v", err)
+	}
+	wantSHA256, err := base64.StdEncoding.DecodeString("+D8nGudz3G/kpkVKQeDrI3xD57v0UeQmzGCZOk03nsU=")
+	if err != nil {
+		t.Fatalf("DecodeString(SHA-256): %v", err)
+	}
+	wantMD5, err := base64.StdEncoding.DecodeString("LJDK2+9ClF8Nz/K5WZd/+A==")
+	if err != nil {
+		t.Fatalf("DecodeString(MD5): %v", err)
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wd := r.Header.Get("Want-Digest")
 		if wd == "" {
@@ -2308,12 +2501,32 @@ func TestDigestResponseHeaderParsing(t *testing.T) {
 	d := pkghttp.NewDriver(opts)
 	defer d.Close()
 
-	rc, err := d.Download(context.Background(), srv.URL+"/file.bin", 0, 0)
+	info, err := d.ProbeInfo(context.Background(), srv.URL+"/file.bin")
 	if err != nil {
-		t.Fatalf("Download: %v", err)
+		t.Fatalf("ProbeInfo: %v", err)
 	}
-	io.ReadAll(rc)
-	rc.Close()
+	if len(info.Digests) != 3 {
+		t.Fatalf("ProbeInfo digests = %d, want 3", len(info.Digests))
+	}
+	if info.Digests[0].Kind != hash.SHA1 || !bytes.Equal(info.Digests[0].Digest, wantSHA1) {
+		t.Fatalf("ProbeInfo digest[0] = %#v, want SHA-1", info.Digests[0])
+	}
+	if info.Digests[1].Kind != hash.SHA256 || !bytes.Equal(info.Digests[1].Digest, wantSHA256) {
+		t.Fatalf("ProbeInfo digest[1] = %#v, want SHA-256", info.Digests[1])
+	}
+	if info.Digests[2].Kind != hash.MD5 || !bytes.Equal(info.Digests[2].Digest, wantMD5) {
+		t.Fatalf("ProbeInfo digest[2] = %#v, want MD5", info.Digests[2])
+	}
+
+	resp, err := d.DownloadResponseWithOptions(context.Background(), srv.URL+"/file.bin", 0, 0, pkghttp.RequestOptions{})
+	if err != nil {
+		t.Fatalf("DownloadResponseWithOptions: %v", err)
+	}
+	if len(resp.Digests) != 3 {
+		t.Fatalf("DownloadResponse digests = %d, want 3", len(resp.Digests))
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
 }
 
 // ---- net/http.Header operations (parallel to C++ HttpHeader::findAll, fieldContains, clearField, remove) ----
@@ -2861,6 +3074,46 @@ func TestProbeContentDispositionFilename(t *testing.T) {
 	}
 	if filename != "download.zip" {
 		t.Errorf("filename = %q, want %q", filename, "download.zip")
+	}
+}
+
+func TestProbeContentDispositionDefaultUTF8Option(t *testing.T) {
+	header := "attachment; filename=\"caf\xc3\xa9.txt\""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", header)
+		w.Header().Set("Content-Length", "4")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	driver := pkghttp.NewDriver(pkghttp.Opts{
+		Dialer:                        newDialer(),
+		Timeout:                       10 * time.Second,
+		ContentDispositionDefaultUTF8: false,
+	})
+	defer driver.Close()
+
+	_, _, _, filename, err := driver.Probe(context.Background(), srv.URL+"/utf8.bin")
+	if err != nil {
+		t.Fatalf("Probe(defaultUTF8=false): %v", err)
+	}
+	if filename != "cafÃ©.txt" {
+		t.Fatalf("filename(defaultUTF8=false) = %q, want %q", filename, "cafÃ©.txt")
+	}
+
+	driverUTF8 := pkghttp.NewDriver(pkghttp.Opts{
+		Dialer:                        newDialer(),
+		Timeout:                       10 * time.Second,
+		ContentDispositionDefaultUTF8: true,
+	})
+	defer driverUTF8.Close()
+
+	_, _, _, filename, err = driverUTF8.Probe(context.Background(), srv.URL+"/utf8.bin")
+	if err != nil {
+		t.Fatalf("Probe(defaultUTF8=true): %v", err)
+	}
+	if filename != "café.txt" {
+		t.Fatalf("filename(defaultUTF8=true) = %q, want %q", filename, "café.txt")
 	}
 }
 

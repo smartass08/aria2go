@@ -151,7 +151,11 @@ func Default() *Options {
 		DHTListenPort:              "6881-6999",
 		DHTListenAddr:              "",
 		DHTListenAddr6:             "",
+		DHTEntryPointHost:          "",
+		DHTEntryPointPort:          "",
 		DHTEntryPoint:              nil,
+		DHTEntryPointHost6:         "",
+		DHTEntryPointPort6:         "",
 		DHTEntryPoint6:             nil,
 		DHTFilePath:                "",
 		DHTFilePath6:               "",
@@ -296,6 +300,21 @@ func Validate(o *Options) error {
 	}
 	if !validateSize(o.MinSplitSize) {
 		return &Error{Code: ErrInvalidOption, Msg: fmt.Sprintf("min-split-size is not a valid size: %q", o.MinSplitSize)}
+	}
+	if o.SummaryInterval != "" {
+		n, err := strconv.Atoi(o.SummaryInterval)
+		if err != nil || n < 0 {
+			return &Error{Code: ErrInvalidOption, Msg: fmt.Sprintf("summary-interval must be >= 0, got %q", o.SummaryInterval)}
+		}
+	}
+	if o.StartupIdleTime != "" {
+		n, err := strconv.Atoi(o.StartupIdleTime)
+		if err != nil || n < 1 || n > 60 {
+			return &Error{Code: ErrInvalidOption, Msg: fmt.Sprintf("startup-idle-time must be between 1 and 60, got %q", o.StartupIdleTime)}
+		}
+	}
+	if o.EventPoll != "" && !isValidEventPollValue(o.EventPoll) {
+		return &Error{Code: ErrInvalidOption, Msg: fmt.Sprintf("event-poll must be one of %s, got %q", strings.Join(validEventPollValues(), ","), o.EventPoll)}
 	}
 	if o.MaxTries < 0 {
 		return &Error{Code: ErrInvalidOption, Msg: fmt.Sprintf("max-tries must be >= 0, got %d", o.MaxTries)}

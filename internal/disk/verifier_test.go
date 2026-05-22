@@ -22,7 +22,7 @@ func TestVerifierEmptyHashes(t *testing.T) {
 
 	sf.SetPieceCount(4)
 
-	v := NewVerifier(sf, nil, hash.SHA1)
+	v := NewVerifier(sf, nil, hash.SHA1, 64)
 	bad, err := v.Verify(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestVerifierEmptyHashes(t *testing.T) {
 		t.Errorf("badIndices = %v, want nil for nil hashes", bad)
 	}
 
-	v2 := NewVerifier(sf, [][]byte{}, hash.SHA1)
+	v2 := NewVerifier(sf, [][]byte{}, hash.SHA1, 64)
 	bad, err = v2.Verify(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestVerifierAllPass(t *testing.T) {
 		sf.MarkPiece(i, true)
 	}
 
-	v := NewVerifier(sf, pieceHashes, hash.SHA1)
+	v := NewVerifier(sf, pieceHashes, hash.SHA1, pieceLen)
 	bad, err := v.Verify(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -96,9 +96,10 @@ func TestVerifierNonEvenPieceLen(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "test.dat")
 
-	// totalSize not evenly divisible: verifier derives pieceLen = 30/4 = 7.
+	// totalSize is not evenly divisible; the final piece is shorter.
 	const totalSize = 30
 	const numPieces = 4
+	const pieceLen = 8
 
 	data := make([]byte, totalSize)
 	for i := range data {
@@ -117,9 +118,6 @@ func TestVerifierNonEvenPieceLen(t *testing.T) {
 
 	sf.SetPieceCount(numPieces)
 
-	// Compute expected piece hashes the same way the verifier does:
-	// pieceLen = size/numPieces, actualLen = min(pieceLen, size - i*pieceLen).
-	pieceLen := int64(totalSize / numPieces) // 7
 	hasher, err := hash.New(hash.SHA1)
 	if err != nil {
 		t.Fatal(err)
@@ -127,17 +125,18 @@ func TestVerifierNonEvenPieceLen(t *testing.T) {
 
 	pieceHashes := make([][]byte, numPieces)
 	for i := 0; i < numPieces; i++ {
-		actualLen := pieceLen
-		if rem := int64(totalSize) - int64(i)*pieceLen; rem < pieceLen {
+		actualLen := int64(pieceLen)
+		if rem := int64(totalSize) - int64(i)*int64(pieceLen); rem < actualLen {
 			actualLen = rem
 		}
 		hasher.Reset()
-		hasher.Write(data[i*int(pieceLen) : i*int(pieceLen)+int(actualLen)])
+		start := i * pieceLen
+		hasher.Write(data[start : start+int(actualLen)])
 		pieceHashes[i] = hasher.Sum(nil)
 		sf.MarkPiece(i, true)
 	}
 
-	v := NewVerifier(sf, pieceHashes, hash.SHA1)
+	v := NewVerifier(sf, pieceHashes, hash.SHA1, pieceLen)
 	bad, err := v.Verify(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +193,7 @@ func TestVerifierCorruptedData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v := NewVerifier(sf, pieceHashes, hash.SHA1)
+	v := NewVerifier(sf, pieceHashes, hash.SHA1, pieceLen)
 	bad, err := v.Verify(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +245,7 @@ func TestVerifierContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	v := NewVerifier(sf, pieceHashes, hash.SHA1)
+	v := NewVerifier(sf, pieceHashes, hash.SHA1, pieceLen)
 	bad, err := v.Verify(ctx)
 	if err != context.Canceled {
 		t.Errorf("err = %v, want context.Canceled", err)
@@ -298,7 +297,7 @@ func TestVerifierTimeout(t *testing.T) {
 	defer cancel()
 	time.Sleep(time.Millisecond)
 
-	v := NewVerifier(sf, pieceHashes, hash.SHA1)
+	v := NewVerifier(sf, pieceHashes, hash.SHA1, 16)
 	_, err = v.Verify(ctx)
 	if err == nil {
 		t.Error("expected context deadline exceeded or canceled")
@@ -352,7 +351,7 @@ func TestVerifierOnlyHavesChecked(t *testing.T) {
 	sf.MarkPiece(0, true)
 	sf.MarkPiece(2, true)
 
-	v := NewVerifier(sf, pieceHashes, hash.SHA1)
+	v := NewVerifier(sf, pieceHashes, hash.SHA1, pieceLen)
 	bad, err := v.Verify(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -397,7 +396,7 @@ func TestVerifierReadErrorBecomesBadIndex(t *testing.T) {
 		pieceHashes[i] = pHash
 	}
 
-	v := NewVerifier(sf, pieceHashes, hash.SHA1)
+	v := NewVerifier(sf, pieceHashes, hash.SHA1, 16)
 	bad, err := v.Verify(context.Background())
 	if err != nil {
 		t.Fatal(err)

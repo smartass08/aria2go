@@ -84,7 +84,7 @@ func buildHTTPAnnounceURL(baseURL string, req AnnounceRequest) (string, error) {
 	if req.Event != "" {
 		q.Set("event", req.Event)
 	}
-	if req.NumWant > 0 {
+	if req.NumWant >= 0 {
 		q.Set("numwant", strconv.Itoa(req.NumWant))
 	}
 	q.SetBytes("key", []byte(httpKey(req.PeerID)))

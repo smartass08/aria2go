@@ -31,10 +31,20 @@ type DialerConfig struct {
 	LocalAddr  string
 	PreferIPv4 bool
 	PreferIPv6 bool
-	ProxyURL   string
-	ProxyUser  string
-	ProxyPass  string
-	NoProxy    string
+	// DisableIPv6 hard-disables IPv6, including explicit IPv6 literals and
+	// async DNS AAAA lookups. Mirrors aria2's --disable-ipv6 option.
+	DisableIPv6 bool
+	AsyncDNS    bool
+	// EnableAsyncDNS6 enables AAAA lookups in the async resolver. It is ignored
+	// when AsyncDNS is false, mirroring aria2's runtime behaviour.
+	EnableAsyncDNS6 bool
+	// AsyncDNSServer configures the DNS server list for AsyncDNS in aria2's
+	// comma-separated IP[:port] syntax.
+	AsyncDNSServer string
+	ProxyURL       string
+	ProxyUser      string
+	ProxyPass      string
+	NoProxy        string
 	// SocketRecvBufferSize is the SO_RCVBUF value in bytes. 0 means system default.
 	// Mirrors aria2's --socket-recv-buffer-size option.
 	SocketRecvBufferSize int
@@ -58,6 +68,7 @@ type Dialer struct {
 	cfg      DialerConfig
 	proxyURL *url.URL
 	proxyTLS bool
+	resolver *Resolver
 
 	closed bool
 	mu     sync.Mutex
@@ -75,6 +86,7 @@ type Dialer struct {
 	// Per-call copies inherit the ControlContext method value without
 	// allocating a new closure.
 	baseDialer net.Dialer
+	reuseKey   string
 }
 
 // NewDialer creates a Dialer from cfg.  It validates the configuration
@@ -111,6 +123,9 @@ func NewDialer(cfg DialerConfig) (*Dialer, error) {
 	if cfg.PreferIPv4 && cfg.PreferIPv6 {
 		return nil, errors.New("netx: PreferIPv4 and PreferIPv6 are mutually exclusive")
 	}
+	if cfg.DisableIPv6 && cfg.PreferIPv6 {
+		return nil, errors.New("netx: DisableIPv6 and PreferIPv6 are mutually exclusive")
+	}
 
 	if cfg.Interface != "" && !platform.Caps().InterfaceBind {
 		return nil, fmt.Errorf("netx: interface binding not available on this platform")
@@ -141,6 +156,13 @@ func NewDialer(cfg DialerConfig) (*Dialer, error) {
 	}
 	d.recvBufSize = cfg.SocketRecvBufferSize
 	d.nodefaultSet = cfg.DisableNodelay
+	if cfg.AsyncDNS {
+		d.resolver = NewResolverWithConfig(ResolverConfig{
+			Servers:    cfg.AsyncDNSServer,
+			EnableIPv6: asyncResolverIPv6Enabled(cfg),
+		})
+	}
+	d.reuseKey = buildDialerReuseKey(cfg)
 
 	// Bind the control method value once on the template dialer.
 	// Per-call copies share this method value — no closure allocation.
@@ -171,6 +193,10 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		return nil, errors.New("netx: dialer is closed")
 	}
 	d.mu.Unlock()
+
+	if err := d.rejectDisabledIPv6Address(addr); err != nil {
+		return nil, err
+	}
 
 	if d.proxyURL != nil && !d.proxyBypassed(addr) {
 		return d.dialProxy(ctx, network, addr)
@@ -229,12 +255,11 @@ func (d *Dialer) DialUDP(ctx context.Context, addr string) (*net.UDPConn, error)
 	}
 	d.mu.Unlock()
 
-	network := "udp"
-	if d.cfg.PreferIPv4 {
-		network = "udp4"
-	} else if d.cfg.PreferIPv6 {
-		network = "udp6"
+	if err := d.rejectDisabledIPv6Address(addr); err != nil {
+		return nil, err
 	}
+
+	network := d.preferredNetwork("udp")
 
 	dl := d.baseDialer // shallow copy
 	dl.Timeout = d.dialTimeout(ctx)
@@ -250,7 +275,7 @@ func (d *Dialer) DialUDP(ctx context.Context, addr string) (*net.UDPConn, error)
 		dl.FallbackDelay = 300 * time.Millisecond
 	}
 
-	conn, err := dl.DialContext(ctx, network, addr)
+	conn, err := d.dialResolved(ctx, &dl, network, addr)
 	if err != nil {
 		return nil, fmt.Errorf("netx: dial UDP: %w", err)
 	}
@@ -287,6 +312,7 @@ func (d *Dialer) dialTimeout(ctx context.Context) time.Duration {
 }
 
 func (d *Dialer) dialDirect(ctx context.Context, network, addr string) (net.Conn, error) {
+	network = d.preferredNetwork(network)
 	dl := d.baseDialer // shallow copy — ControlContext method value is shared
 	dl.Timeout = d.dialTimeout(ctx)
 	dl.KeepAlive = d.cfg.KeepAlive
@@ -301,7 +327,7 @@ func (d *Dialer) dialDirect(ctx context.Context, network, addr string) (net.Conn
 	if !d.cfg.PreferIPv4 && !d.cfg.PreferIPv6 {
 		dl.FallbackDelay = 300 * time.Millisecond
 	}
-	conn, err := dl.DialContext(ctx, network, addr)
+	conn, err := d.dialResolved(ctx, &dl, network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +338,20 @@ func (d *Dialer) dialDirect(ctx context.Context, network, addr string) (net.Conn
 }
 
 func (d *Dialer) dualStack() bool {
-	return !d.cfg.PreferIPv4 && !d.cfg.PreferIPv6
+	return !d.cfg.DisableIPv6 && !d.cfg.PreferIPv4 && !d.cfg.PreferIPv6
+}
+
+func (d *Dialer) preferredNetwork(network string) string {
+	switch network {
+	case "tcp", "udp":
+		if d.cfg.DisableIPv6 || d.cfg.PreferIPv4 {
+			return network + "4"
+		}
+		if d.cfg.PreferIPv6 {
+			return network + "6"
+		}
+	}
+	return network
 }
 
 // controlContext is the method value bound to baseDialer.ControlContext.
@@ -386,12 +425,88 @@ func (d *Dialer) setSocketDefaults(c syscall.RawConn, network string) error {
 	return lastErr
 }
 
+func (d *Dialer) dialResolved(ctx context.Context, dl *net.Dialer, network, addr string) (net.Conn, error) {
+	if d.resolver == nil {
+		return dl.DialContext(ctx, network, addr)
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return dl.DialContext(ctx, network, addr)
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		ipNetwork, err := d.addressNetworkForIP(network, ip)
+		if err != nil {
+			return nil, err
+		}
+		return dl.DialContext(ctx, ipNetwork, net.JoinHostPort(host, port))
+	}
+
+	addrs, err := d.resolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("netx: resolve %s: %w", host, err)
+	}
+	var dialErrs []error
+	var blockedErr error
+	for _, resolved := range addrs {
+		ip := net.ParseIP(resolved)
+		if ip == nil {
+			continue
+		}
+		ipNetwork, err := d.addressNetworkForIP(network, ip)
+		if err != nil {
+			blockedErr = err
+			continue
+		}
+		conn, err := dl.DialContext(ctx, ipNetwork, net.JoinHostPort(resolved, port))
+		if err == nil {
+			return conn, nil
+		}
+		dialErrs = append(dialErrs, err)
+	}
+	if len(dialErrs) == 0 {
+		if blockedErr != nil {
+			return nil, blockedErr
+		}
+		return nil, fmt.Errorf("netx: resolve %s returned no dialable addresses", host)
+	}
+	if len(dialErrs) == 1 {
+		return nil, dialErrs[0]
+	}
+	return nil, errors.Join(dialErrs...)
+}
+
+func (d *Dialer) addressNetworkForIP(network string, ip net.IP) (string, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		if ip.To4() != nil {
+			return "tcp4", nil
+		}
+		if d.cfg.DisableIPv6 {
+			return "", fmt.Errorf("netx: IPv6 disabled for address %s", ip.String())
+		}
+		return "tcp6", nil
+	case "udp", "udp4", "udp6":
+		if ip.To4() != nil {
+			return "udp4", nil
+		}
+		if d.cfg.DisableIPv6 {
+			return "", fmt.Errorf("netx: IPv6 disabled for address %s", ip.String())
+		}
+		return "udp6", nil
+	default:
+		return network, nil
+	}
+}
+
 func isTCP(network string) bool {
 	return network == "tcp" || network == "tcp4" || network == "tcp6"
 }
 
 // dialProxy establishes a TCP tunnel through an HTTP CONNECT proxy.
 func (d *Dialer) dialProxy(ctx context.Context, network, addr string) (net.Conn, error) {
+	network = d.preferredNetwork(network)
 	host, port, err := net.SplitHostPort(d.proxyURL.Host)
 	if err != nil {
 		host = d.proxyURL.Host
@@ -402,6 +517,9 @@ func (d *Dialer) dialProxy(ctx context.Context, network, addr string) (net.Conn,
 		}
 	}
 	proxyAddr := net.JoinHostPort(host, port)
+	if err := d.rejectDisabledIPv6Address(proxyAddr); err != nil {
+		return nil, err
+	}
 
 	dl := d.baseDialer // shallow copy
 	dl.Timeout = d.dialTimeout(ctx)
@@ -419,9 +537,9 @@ func (d *Dialer) dialProxy(ctx context.Context, network, addr string) (net.Conn,
 	}
 	proxyNetwork := network
 	if !isTCP(proxyNetwork) {
-		proxyNetwork = "tcp"
+		proxyNetwork = d.preferredNetwork("tcp")
 	}
-	conn, err := dl.DialContext(ctx, proxyNetwork, proxyAddr)
+	conn, err := d.dialResolved(ctx, &dl, proxyNetwork, proxyAddr)
 	if err != nil {
 		return nil, fmt.Errorf("netx: dial proxy %s: %w", proxyAddr, err)
 	}
@@ -510,6 +628,12 @@ func (d *Dialer) dialProxy(ctx context.Context, network, addr string) (net.Conn,
 	return proxyTunnelConn(conn, br), nil
 }
 
+// ReuseKey returns a stable key for pooling higher-level protocol connections
+// that depend on this dialer's network and proxy settings.
+func (d *Dialer) ReuseKey() string {
+	return d.reuseKey
+}
+
 func proxyTLSServerName(host string) string {
 	if ip := net.ParseIP(host); ip != nil {
 		return ""
@@ -594,4 +718,69 @@ func encodeBasicAuth(user, pass string) string {
 	*bufp = buf[:0]
 	basicAuthPool.Put(bufp)
 	return result
+}
+
+var probeIPv6Availability = func() bool {
+	conn, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func asyncResolverIPv6Enabled(cfg DialerConfig) bool {
+	if !cfg.EnableAsyncDNS6 || cfg.PreferIPv4 || cfg.DisableIPv6 {
+		return false
+	}
+	return probeIPv6Availability()
+}
+
+func buildDialerReuseKey(cfg DialerConfig) string {
+	parts := []string{
+		cfg.Interface,
+		cfg.LocalAddr,
+		strconv.FormatBool(cfg.PreferIPv4),
+		strconv.FormatBool(cfg.PreferIPv6),
+		strconv.FormatBool(cfg.DisableIPv6),
+		strconv.FormatBool(cfg.AsyncDNS),
+		strconv.FormatBool(cfg.EnableAsyncDNS6),
+		cfg.AsyncDNSServer,
+		cfg.ProxyURL,
+		cfg.ProxyUser,
+		cfg.ProxyPass,
+		cfg.NoProxy,
+		strconv.Itoa(cfg.SocketRecvBufferSize),
+		strconv.Itoa(cfg.DSCP),
+		strconv.FormatBool(cfg.DisableNodelay),
+		cfg.Interfaces,
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func (d *Dialer) rejectDisabledIPv6Address(addr string) error {
+	if !d.cfg.DisableIPv6 {
+		return nil
+	}
+	host := addrHost(addr)
+	if host == "" {
+		return nil
+	}
+	ipHost := host
+	if i := strings.LastIndex(ipHost, "%"); i != -1 {
+		ipHost = ipHost[:i]
+	}
+	ip := net.ParseIP(ipHost)
+	if ip == nil || ip.To4() != nil {
+		return nil
+	}
+	return fmt.Errorf("netx: IPv6 disabled for address %s", host)
+}
+
+func addrHost(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(addr, "[]")
 }

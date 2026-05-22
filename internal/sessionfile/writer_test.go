@@ -220,8 +220,9 @@ func TestWriteCumulativeOptions(t *testing.T) {
 		GID:    core.GID(1),
 		Status: core.StatusWaiting,
 		Options: map[string]string{
-			"bt-tracker": "http://tracker1.example.com/announce\nhttp://tracker2.example.com/announce",
-			"header":     "X-Custom: value1\nX-Custom: value2",
+			"bt-tracker":      "http://tracker1.example.com/announce\nhttp://tracker2.example.com/announce",
+			"dht-entry-point": "router.bittorrent.com:6881\ndht.transmissionbt.com:6881",
+			"header":          "X-Custom: value1\nX-Custom: value2",
 		},
 	}
 
@@ -240,6 +241,9 @@ func TestWriteCumulativeOptions(t *testing.T) {
 	// Each header value on its own line
 	if strings.Count(out, " header=") != 2 {
 		t.Errorf("expected 2 header lines (cumulative), got:\n%s", out)
+	}
+	if strings.Count(out, " dht-entry-point=") != 2 {
+		t.Errorf("expected 2 dht-entry-point lines (cumulative), got:\n%s", out)
 	}
 }
 
@@ -340,14 +344,13 @@ func TestAtomicSaveGzip(t *testing.T) {
 	}
 }
 
-func TestWriteGIDDuplication(t *testing.T) {
-	// aria2 writes gid at special position 1 AND at ID 99 in canonical iteration.
+func TestWriteGIDSkipsOptionDuplication(t *testing.T) {
 	entry := Entry{
 		URIs:   []string{"https://example.com/file.zip"},
 		GID:    core.GID(1),
 		Status: core.StatusWaiting,
 		Options: map[string]string{
-			"gid": "0000000000000001", // explicit gid in options triggers duplication
+			"gid": "0000000000000001",
 		},
 	}
 
@@ -358,14 +361,12 @@ func TestWriteGIDDuplication(t *testing.T) {
 
 	out := buf.String()
 	count := strings.Count(out, " gid=0000000000000001\n")
-	if count < 2 {
-		t.Errorf("expected gid to appear at least twice when in options, got %d\n%s", count, out)
+	if count != 1 {
+		t.Errorf("expected gid to appear once, got %d\n%s", count, out)
 	}
 }
 
-func TestWritePauseDuplication(t *testing.T) {
-	// aria2 writes pause at special position 2 AND at ID 90 in canonical iteration
-	// when pause=true and definedLocal.
+func TestWritePauseSkipsOptionDuplication(t *testing.T) {
 	entry := Entry{
 		URIs:   []string{"https://example.com/file.zip"},
 		GID:    core.GID(1),
@@ -382,8 +383,8 @@ func TestWritePauseDuplication(t *testing.T) {
 
 	out := buf.String()
 	count := strings.Count(out, " pause=true\n")
-	if count < 2 {
-		t.Errorf("expected pause to appear at least twice when in options, got %d\n%s", count, out)
+	if count != 1 {
+		t.Errorf("expected pause to appear once, got %d\n%s", count, out)
 	}
 }
 

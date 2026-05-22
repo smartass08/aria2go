@@ -63,6 +63,28 @@ func TestParseV4Basic(t *testing.T) {
 	}
 }
 
+func TestParseV4ResolveRelativeURLWithBaseURI(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="example.iso">
+    <url>payload/example.iso</url>
+  </file>
+</metalink>`
+
+	doc, err := metalink.ParseWithOptions(strings.NewReader(xml), metalink.ParseOptions{
+		BaseURI: "http://mirror.example/downloads/",
+	})
+	if err != nil {
+		t.Fatalf("ParseWithOptions error: %v", err)
+	}
+	if got := doc.Files[0].URLs[0].URL; got != "http://mirror.example/downloads/payload/example.iso" {
+		t.Fatalf("resolved URL = %q", got)
+	}
+	if got := doc.Files[0].URLs[0].Type; got != "http" {
+		t.Fatalf("resolved URL type = %q, want http", got)
+	}
+}
+
 func TestParseV4WithHash(t *testing.T) {
 	xml := `<?xml version="1.0" encoding="UTF-8"?>
 <metalink xmlns="urn:ietf:params:xml:ns:metalink">
@@ -804,6 +826,74 @@ func TestParseBasicMeta4Testdata(t *testing.T) {
 	}
 	wantDigest := mustHexDecode(t, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
 	compareBytes(t, digest, wantDigest, "digest")
+}
+
+func TestQueryFiltersVersionLanguageOS(t *testing.T) {
+	doc := &metalink.Doc{
+		Files: []metalink.File{
+			{
+				Name:      "keep.bin",
+				Version:   "1.0",
+				Languages: []string{"en", "ja"},
+				OSes:      []string{"linux"},
+			},
+			{
+				Name:      "drop.bin",
+				Version:   "2.0",
+				Languages: []string{"fr"},
+				OSes:      []string{"windows"},
+			},
+		},
+	}
+
+	filtered := metalink.Query(doc, metalink.QueryOptions{
+		Version:  "1.0",
+		Language: "en",
+		OS:       "linux",
+	})
+	if len(filtered.Files) != 1 {
+		t.Fatalf("filtered files = %d, want 1", len(filtered.Files))
+	}
+	if filtered.Files[0].Name != "keep.bin" {
+		t.Fatalf("filtered file = %q, want keep.bin", filtered.Files[0].Name)
+	}
+}
+
+func TestOrderURLsAppliesLocationAndPreferredProtocol(t *testing.T) {
+	urls := []metalink.URLEntry{
+		{URL: "ftp://mirror.example/pkg.tar", Type: "ftp", Priority: 1, Location: "us"},
+		{URL: "https://mirror.example/pkg.tar", Type: "https", Priority: 20, Location: "de"},
+		{URL: "http://mirror.example/pkg.tar", Type: "http", Priority: 10, Location: "us"},
+	}
+
+	ordered := metalink.OrderURLs(urls, metalink.QueryOptions{
+		Locations:         []string{"us"},
+		PreferredProtocol: "http",
+	})
+	if len(ordered) != 3 {
+		t.Fatalf("ordered urls = %d, want 3", len(ordered))
+	}
+	if ordered[0].URL != "http://mirror.example/pkg.tar" {
+		t.Fatalf("first URL = %q, want preferred http US mirror", ordered[0].URL)
+	}
+	if ordered[1].URL != "ftp://mirror.example/pkg.tar" {
+		t.Fatalf("second URL = %q, want fallback US mirror", ordered[1].URL)
+	}
+}
+
+func TestStrongestHashReturnsStrongestDigest(t *testing.T) {
+	want := mustHexDecode(t, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+	kind, digest, ok := metalink.StrongestHash(map[hash.Kind][]byte{
+		hash.SHA1:   mustHexDecode(t, "a9993e364706816aba3e25717850c26c9cd0d89d"),
+		hash.SHA256: want,
+	})
+	if !ok {
+		t.Fatal("StrongestHash returned ok=false")
+	}
+	if kind != hash.SHA256 {
+		t.Fatalf("strongest kind = %q, want %q", kind, hash.SHA256)
+	}
+	compareBytes(t, digest, want, "digest")
 }
 
 func TestParseV4InvalidSizeCancelsEntry(t *testing.T) {

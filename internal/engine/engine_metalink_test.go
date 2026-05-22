@@ -1,9 +1,13 @@
 package engine
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/smartass08/aria2go/internal/config"
+	"github.com/smartass08/aria2go/internal/core"
 	"github.com/smartass08/aria2go/internal/hash"
 )
 
@@ -51,6 +55,82 @@ func TestMetalinkDownloadEntriesPreferConfiguredProtocol(t *testing.T) {
 	}
 	if got[0].URI != "https://mirror.example/pkg.tar" {
 		t.Fatalf("first URI = %q, want preferred https mirror", got[0].URI)
+	}
+}
+
+func TestMetalinkDownloadEntriesPreferConfiguredLocation(t *testing.T) {
+	data := []byte(`<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="pkg.tar">
+    <url priority="1" location="de">http://de.example/pkg.tar</url>
+    <url priority="20" location="us">http://us.example/pkg.tar</url>
+  </file>
+</metalink>`)
+
+	got, err := metalinkDownloadEntries(data, &config.Options{MetalinkLocation: "us"})
+	if err != nil {
+		t.Fatalf("metalinkDownloadEntries() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("entries = %d, want 2", len(got))
+	}
+	if got[0].URI != "http://us.example/pkg.tar" || got[0].Name != "pkg.tar" {
+		t.Fatalf("first entry = %#v", got[0])
+	}
+	if got[1].URI != "http://de.example/pkg.tar" {
+		t.Fatalf("second URI = %q, want de mirror", got[1].URI)
+	}
+}
+
+func TestMetalinkDownloadEntriesFilterByVersionLanguageOS(t *testing.T) {
+	data := []byte(`<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="drop.bin">
+    <version>2.0</version>
+    <language>fr</language>
+    <os>windows</os>
+    <url>http://mirror.example/drop.bin</url>
+  </file>
+  <file name="keep.bin">
+    <version>1.0</version>
+    <language>en</language>
+    <os>linux</os>
+    <url>http://mirror.example/keep.bin</url>
+  </file>
+</metalink>`)
+
+	got, err := metalinkDownloadEntries(data, &config.Options{
+		MetalinkVersion:  "1.0",
+		MetalinkLanguage: "en",
+		MetalinkOS:       "linux",
+	})
+	if err != nil {
+		t.Fatalf("metalinkDownloadEntries() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("entries = %d, want 1", len(got))
+	}
+	if got[0].Name != "keep.bin" || got[0].URI != "http://mirror.example/keep.bin" {
+		t.Fatalf("entry = %#v, want keep.bin", got[0])
+	}
+}
+
+func TestMetalinkDownloadEntriesResolveRelativeURLWithBaseURI(t *testing.T) {
+	data := []byte(`<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="pkg.tar">
+    <url>payload/pkg.tar</url>
+  </file>
+</metalink>`)
+
+	got, err := metalinkDownloadEntries(data, &config.Options{
+		MetalinkBaseURI: "http://mirror.example/downloads/",
+	})
+	if err != nil {
+		t.Fatalf("metalinkDownloadEntries() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("entries = %d, want 1", len(got))
+	}
+	if got[0].URI != "http://mirror.example/downloads/payload/pkg.tar" {
+		t.Fatalf("resolved URI = %q", got[0].URI)
 	}
 }
 
@@ -138,4 +218,60 @@ func TestMetalinkDownloadEntriesIncludeAllFiles(t *testing.T) {
 	if got[0].Name != "first" || got[1].Name != "second" {
 		t.Fatalf("entry names = %q/%q, want first/second", got[0].Name, got[1].Name)
 	}
+}
+
+func TestVerifyMetalinkDownloadRejectsWholeFileHashMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pkg.tar")
+	if err := os.WriteFile(path, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	code, msg := verifyMetalinkDownload(context.Background(), path, metalinkDownloadEntry{
+		Hashes: map[hash.Kind][]byte{
+			hash.SHA256: bytesForHash(t, hash.SHA256, "different"),
+		},
+	})
+	if code != core.ExitChecksumError {
+		t.Fatalf("verification code = %d, want %d", code, core.ExitChecksumError)
+	}
+	if msg == "" {
+		t.Fatal("verification message is empty")
+	}
+}
+
+func TestVerifyMetalinkDownloadRejectsPieceHashMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pkg.tar")
+	if err := os.WriteFile(path, []byte("abcdef"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	code, msg := verifyMetalinkDownload(context.Background(), path, metalinkDownloadEntry{
+		PieceHashKind: hash.SHA1,
+		PieceLength:   3,
+		Pieces: [][]byte{
+			bytesForHash(t, hash.SHA1, "abc"),
+			bytesForHash(t, hash.SHA1, "zzz"),
+		},
+	})
+	if code != core.ExitChecksumError {
+		t.Fatalf("verification code = %d, want %d", code, core.ExitChecksumError)
+	}
+	if msg == "" {
+		t.Fatal("verification message is empty")
+	}
+}
+
+func bytesForHash(t *testing.T, kind hash.Kind, data string) []byte {
+	t.Helper()
+	h, err := hash.New(kind)
+	if err != nil {
+		t.Fatalf("hash.New(%q): %v", kind, err)
+	}
+	defer hash.PoolPut(kind, h)
+	if _, err := h.Write([]byte(data)); err != nil {
+		t.Fatalf("hash write: %v", err)
+	}
+	return h.Sum(nil)
 }

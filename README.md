@@ -13,11 +13,16 @@ still be the cleaner and safer way to reuse a mature C++ codebase. The point of
 this repository is different: to see how close a clean Go port can get when it
 is repeatedly checked against the original implementation.
 
-The current tree has been battle-tested with side-by-side conformance tests
-against the reference `aria2c` binary. Those tests run offline using local
-HTTP, FTP, SFTP, BitTorrent, Metalink, and RPC fixtures, then compare exit
-codes, files, request traces, stdout/stderr behavior, RPC responses, and edge
-case behavior against `aria2c`.
+The covered paths are battle-tested with side-by-side conformance tests against
+the reference `aria2c` binary. Those tests run offline using local HTTP, FTP,
+SFTP, BitTorrent, Metalink, and RPC fixtures, then compare exit codes, files,
+request traces, stdout/stderr behavior, RPC responses, and edge case behavior
+against `aria2c`.
+
+This is not full aria2 parity yet. The current feature ledger is tracked in
+[docs/feature-matrix.md](docs/feature-matrix.md), backed by a machine-readable
+matrix that makes conformance fail if a feature is marked implemented without
+runtime coverage.
 
 For the longer write-up on how the AI rewrite was done, see
 [docs/ai-rewrite.md](docs/ai-rewrite.md).

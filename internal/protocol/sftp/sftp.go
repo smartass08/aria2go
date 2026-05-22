@@ -5,28 +5,28 @@ package sftp
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/md5"
-	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/subtle"
-	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/smartass08/aria2go/internal/netx"
+	sshagent "github.com/smartass08/aria2go/internal/ssh/agent"
 	"github.com/smartass08/aria2go/internal/ssh/channel"
+	sshkeys "github.com/smartass08/aria2go/internal/ssh/keys"
+	"github.com/smartass08/aria2go/internal/ssh/knownhosts"
 	"github.com/smartass08/aria2go/internal/ssh/transport"
 	"github.com/smartass08/aria2go/internal/ssh/userauth"
 )
@@ -118,17 +118,19 @@ func init() {
 type Driver struct{}
 
 type Opts struct {
-	Host      string
-	Port      int
-	User      string
-	Auth      AuthMethods
-	HostKeyMD string
-	Timeout   time.Duration
+	Host           string
+	Port           int
+	User           string
+	Auth           AuthMethods
+	HostKeyMD      string
+	KnownHostsPath string
+	Timeout        time.Duration
 }
 
 type AuthMethods struct {
-	Password string
-	KeyFile  string
+	Password    string
+	KeyFile     string
+	AgentSocket string
 }
 
 type Session struct {
@@ -139,9 +141,10 @@ type Session struct {
 }
 
 type FileInfo struct {
-	Name  string
-	Size  int64
-	IsDir bool
+	Name    string
+	Size    int64
+	IsDir   bool
+	ModTime time.Time
 }
 
 func Open(ctx context.Context, dialer *netx.Dialer, opts Opts) (*Session, error) {
@@ -151,7 +154,7 @@ func Open(ctx context.Context, dialer *netx.Dialer, opts Opts) (*Session, error)
 	if opts.User == "" {
 		opts.User = "anonymous"
 	}
-	if opts.Auth.Password == "" && opts.Auth.KeyFile == "" {
+	if opts.Auth.Password == "" && opts.Auth.KeyFile == "" && opts.Auth.AgentSocket == "" {
 		opts.Auth.Password = "ARIA2USER@"
 	}
 
@@ -172,7 +175,7 @@ func Open(ctx context.Context, dialer *netx.Dialer, opts Opts) (*Session, error)
 		conn.Close()
 		return nil, fmt.Errorf("sftp: handshake: %w", err)
 	}
-	if err := verifyHostKeyDigest(tconn.HostKey(), opts.HostKeyMD); err != nil {
+	if err := verifyHostKey(tconn.HostKey(), conn.RemoteAddr(), opts); err != nil {
 		tconn.Close()
 		return nil, fmt.Errorf("sftp: host key: %w", err)
 	}
@@ -199,6 +202,29 @@ func Open(ctx context.Context, dialer *netx.Dialer, opts Opts) (*Session, error)
 			Username: opts.User,
 			Key:      key,
 		})
+	}
+	if opts.Auth.AgentSocket != "" {
+		ag := &sshagent.Agent{}
+		if err := ag.Connect(opts.Auth.AgentSocket); err == nil {
+			defer ag.Close()
+			ids, err := ag.List()
+			if err != nil {
+				if len(authMethods) == 0 {
+					tconn.Close()
+					return nil, fmt.Errorf("sftp: agent identities: %w", err)
+				}
+			} else {
+				for _, id := range ids {
+					authMethods = append(authMethods, &userauth.PublicKeyAuth{
+						Username: opts.User,
+						Key:      sshagent.NewSigner(ag, id),
+					})
+				}
+			}
+		} else if len(authMethods) == 0 {
+			tconn.Close()
+			return nil, fmt.Errorf("sftp: agent connect: %w", err)
+		}
 	}
 	if len(authMethods) == 0 {
 		tconn.Close()
@@ -265,6 +291,7 @@ func (s *Session) init() error {
 }
 
 func (s *Session) Stat(ctx context.Context, path string) (FileInfo, error) {
+	path = decodePath(path)
 	id := s.nextID
 	s.nextID++
 
@@ -308,6 +335,7 @@ func (s *Session) OpenFile(ctx context.Context, path string, offset int64) (io.R
 	if offset < 0 {
 		return nil, fmt.Errorf("sftp: negative offset %d: %w", offset, ErrSftpProtocol)
 	}
+	path = decodePath(path)
 
 	id := s.nextID
 	s.nextID++
@@ -364,6 +392,53 @@ func (s *Session) Close() error {
 		}
 	}
 	return firstErr
+}
+
+func verifyHostKey(hostKey []byte, remote net.Addr, opts Opts) error {
+	if err := verifyHostKeyDigest(hostKey, opts.HostKeyMD); err != nil {
+		return err
+	}
+	if opts.HostKeyMD != "" {
+		return nil
+	}
+	path := opts.KnownHostsPath
+	if path == "" {
+		path = defaultKnownHostsPath()
+	}
+	if path == "" {
+		return nil
+	}
+	cb, err := knownhosts.New(path)
+	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, knownhosts.ErrNoMatch) {
+			return nil
+		}
+		return fmt.Errorf("known_hosts: %w", err)
+	}
+	keyType, err := knownhosts.KeyType(hostKey)
+	if err != nil {
+		return nil
+	}
+	err = cb(knownhosts.HostPort(opts.Host, opts.Port), remote, keyType, hostKey)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, knownhosts.ErrNoMatch) {
+		return err
+	}
+	err = cb(opts.Host, remote, keyType, hostKey)
+	if err == nil || errors.Is(err, knownhosts.ErrNoMatch) {
+		return nil
+	}
+	return err
+}
+
+func defaultKnownHostsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".ssh", "known_hosts")
 }
 
 func verifyHostKeyDigest(hostKey []byte, spec string) error {
@@ -570,6 +645,14 @@ func buildSTAT(id uint32, path string) []byte {
 	return encodeFPacket(sshFxpStat, id, payload, true)
 }
 
+func decodePath(path string) string {
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return path
+	}
+	return decoded
+}
+
 func parseVERSION(payload []byte) (uint32, error) {
 	if len(payload) < 4 {
 		return 0, fmt.Errorf("VERSION payload too short: %d", len(payload))
@@ -677,6 +760,8 @@ func parseATTRS(payload []byte) (FileInfo, error) {
 				if len(payload) < pos+8 {
 					return FileInfo{}, fmt.Errorf("ATTRS truncated at acmodtime")
 				}
+				mtime := binary.BigEndian.Uint32(payload[pos+4:])
+				fi.ModTime = time.Unix(int64(mtime), 0).UTC()
 				pos += 8
 			}
 		}
@@ -815,210 +900,9 @@ func (r *fileReader) Close() error {
 }
 
 func parsePrivateKey(data []byte) (any, error) {
-	if len(data) == 0 {
-		return nil, errors.New("empty key file")
-	}
-
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, fmt.Errorf("sftp: failed to parse PEM block from key file")
-	}
-
-	if isEncryptedPEMBlock(block) {
-		return nil, fmt.Errorf("sftp: encrypted private key requires passphrase (not supported)")
-	}
-
-	switch block.Type {
-	case "RSA PRIVATE KEY":
-		key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("sftp: parse PKCS1 RSA key: %w", err)
-		}
-		return key, nil
-	case "PRIVATE KEY":
-		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("sftp: parse PKCS8 key: %w", err)
-		}
-		switch k := key.(type) {
-		case *rsa.PrivateKey:
-			return k, nil
-		case ed25519.PrivateKey:
-			return k, nil
-		default:
-			return nil, fmt.Errorf("sftp: unsupported PKCS8 key type %T", k)
-		}
-	case "OPENSSH PRIVATE KEY":
-		return parseOpenSSHPrivateKey(block.Bytes)
-	default:
-		return nil, fmt.Errorf("sftp: unsupported PEM type %q", block.Type)
-	}
-}
-
-func isEncryptedPEMBlock(block *pem.Block) bool {
-	return block.Headers["Proc-Type"] == "4,ENCRYPTED" ||
-		block.Headers["DEK-Info"] != ""
-}
-
-func parseOpenSSHPrivateKey(data []byte) (any, error) {
-	const magic = "openssh-key-v1\x00"
-	if len(data) < len(magic) || string(data[:len(magic)]) != magic {
-		return nil, fmt.Errorf("sftp: invalid OpenSSH key magic")
-	}
-	pos := len(magic)
-
-	readString := func() (string, error) {
-		if len(data) < pos+4 {
-			return "", fmt.Errorf("sftp: OpenSSH key truncated at string length")
-		}
-		n := binary.BigEndian.Uint32(data[pos:])
-		pos += 4
-		if len(data) < pos+int(n) {
-			return "", fmt.Errorf("sftp: OpenSSH key truncated at string data")
-		}
-		s := string(data[pos : pos+int(n)])
-		pos += int(n)
-		return s, nil
-	}
-
-	cipherName, err := readString()
+	key, err := sshkeys.ParsePrivateKey(data)
 	if err != nil {
 		return nil, err
 	}
-	kdfName, err := readString()
-	if err != nil {
-		return nil, err
-	}
-	_, err = readString() // kdf options
-	if err != nil {
-		return nil, err
-	}
-
-	if cipherName != "none" || kdfName != "none" {
-		return nil, fmt.Errorf("sftp: encrypted OpenSSH key requires passphrase (not supported)")
-	}
-
-	if len(data) < pos+4 {
-		return nil, fmt.Errorf("sftp: OpenSSH key truncated at key count")
-	}
-	numKeys := binary.BigEndian.Uint32(data[pos:])
-	pos += 4
-	if numKeys != 1 {
-		return nil, fmt.Errorf("sftp: OpenSSH key has %d keys, expected 1", numKeys)
-	}
-
-	pubKey, err := readString()
-	if err != nil {
-		return nil, err
-	}
-	_ = pubKey
-
-	privBlobS, err := readString()
-	if err != nil {
-		return nil, err
-	}
-	privBlob := []byte(privBlobS)
-
-	privPos := 0
-	if len(privBlob) < privPos+8 {
-		return nil, fmt.Errorf("sftp: OpenSSH priv blob too short for check ints")
-	}
-	check1 := binary.BigEndian.Uint32(privBlob[privPos:])
-	privPos += 4
-	check2 := binary.BigEndian.Uint32(privBlob[privPos:])
-	privPos += 4
-	if check1 != check2 {
-		return nil, fmt.Errorf("sftp: OpenSSH key check int mismatch")
-	}
-
-	readPrivBytes := func() ([]byte, error) {
-		if len(privBlob) < privPos+4 {
-			return nil, fmt.Errorf("sftp: OpenSSH priv blob truncated")
-		}
-		n := binary.BigEndian.Uint32(privBlob[privPos:])
-		privPos += 4
-		if len(privBlob) < privPos+int(n) {
-			return nil, fmt.Errorf("sftp: OpenSSH priv blob truncated at data")
-		}
-		b := make([]byte, n)
-		copy(b, privBlob[privPos:privPos+int(n)])
-		privPos += int(n)
-		return b, nil
-	}
-
-	readMpint := func() (*big.Int, error) {
-		b, err := readPrivBytes()
-		if err != nil {
-			return nil, err
-		}
-		if len(b) == 0 {
-			return new(big.Int), nil
-		}
-		return new(big.Int).SetBytes(b), nil
-	}
-
-	keyTypeB, err := readPrivBytes()
-	if err != nil {
-		return nil, err
-	}
-	keyType := string(keyTypeB)
-
-	switch keyType {
-	case "ssh-ed25519":
-		pub, err := readPrivBytes()
-		if err != nil {
-			return nil, err
-		}
-		privFull, err := readPrivBytes()
-		if err != nil {
-			return nil, err
-		}
-		if len(pub) != 32 || len(privFull) != 64 {
-			return nil, fmt.Errorf("sftp: invalid ed25519 key lengths")
-		}
-		return ed25519.NewKeyFromSeed(privFull[:32]), nil
-
-	case "ssh-rsa":
-		n, err := readMpint()
-		if err != nil {
-			return nil, err
-		}
-		e, err := readMpint()
-		if err != nil {
-			return nil, err
-		}
-		d, err := readMpint()
-		if err != nil {
-			return nil, err
-		}
-		iqmp, err := readMpint()
-		if err != nil {
-			return nil, err
-		}
-		p, err := readMpint()
-		if err != nil {
-			return nil, err
-		}
-		q, err := readMpint()
-		if err != nil {
-			return nil, err
-		}
-
-		pubKey2 := rsa.PublicKey{N: n, E: int(e.Int64())}
-		key := &rsa.PrivateKey{
-			PublicKey: pubKey2,
-			D:         d,
-			Primes:    []*big.Int{p, q},
-			Precomputed: rsa.PrecomputedValues{
-				Dp:   new(big.Int).Mod(d, new(big.Int).Sub(p, big.NewInt(1))),
-				Dq:   new(big.Int).Mod(d, new(big.Int).Sub(q, big.NewInt(1))),
-				Qinv: iqmp,
-			},
-		}
-		_ = key.Validate()
-		return key, nil
-
-	default:
-		return nil, fmt.Errorf("sftp: unsupported OpenSSH key type %q", keyType)
-	}
+	return key, nil
 }

@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func TestNewDialer_Defaults(t *testing.T) {
@@ -20,6 +22,60 @@ func TestNewDialer_Defaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
+}
+
+func TestNewDialer_AsyncDNSConfig(t *testing.T) {
+	origProbe := probeIPv6Availability
+	probeIPv6Availability = func() bool { return true }
+	t.Cleanup(func() { probeIPv6Availability = origProbe })
+
+	d, err := NewDialer(DialerConfig{
+		AsyncDNS:             true,
+		EnableAsyncDNS6:      true,
+		AsyncDNSServer:       "8.8.8.8,1.1.1.1:54",
+		PreferIPv4:           false,
+		PreferIPv6:           false,
+		SocketRecvBufferSize: 0,
+	})
+	if err != nil {
+		t.Fatalf("NewDialer() error = %v", err)
+	}
+	defer d.Close()
+
+	if d.resolver == nil {
+		t.Fatal("resolver = nil, want async resolver")
+	}
+	if !d.resolver.enableIPv6 {
+		t.Fatal("resolver.enableIPv6 = false, want true")
+	}
+	if len(d.resolver.servers) != 2 {
+		t.Fatalf("resolver.servers = %v, want 2 entries", d.resolver.servers)
+	}
+	if got := d.preferredNetwork("tcp"); got != "tcp" {
+		t.Fatalf("preferredNetwork(tcp) = %q, want tcp", got)
+	}
+}
+
+func TestNewDialer_AsyncDNSIPv6DisabledWhenUnavailable(t *testing.T) {
+	origProbe := probeIPv6Availability
+	probeIPv6Availability = func() bool { return false }
+	t.Cleanup(func() { probeIPv6Availability = origProbe })
+
+	d, err := NewDialer(DialerConfig{
+		AsyncDNS:        true,
+		EnableAsyncDNS6: true,
+	})
+	if err != nil {
+		t.Fatalf("NewDialer() error = %v", err)
+	}
+	defer d.Close()
+
+	if d.resolver == nil {
+		t.Fatal("resolver = nil, want async resolver")
+	}
+	if d.resolver.enableIPv6 {
+		t.Fatal("resolver.enableIPv6 = true, want false when IPv6 is unavailable")
+	}
 }
 
 func TestNewDialer_InvalidProxyURL(t *testing.T) {
@@ -56,6 +112,13 @@ func TestNewDialer_UnsupportedProxyScheme(t *testing.T) {
 
 func TestNewDialer_MutuallyExclusiveIPv(t *testing.T) {
 	_, err := NewDialer(DialerConfig{PreferIPv4: true, PreferIPv6: true})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestNewDialer_DisableIPv6AndPreferIPv6MutuallyExclusive(t *testing.T) {
+	_, err := NewDialer(DialerConfig{DisableIPv6: true, PreferIPv6: true})
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("expected mutually exclusive error, got: %v", err)
 	}
@@ -108,6 +171,116 @@ func TestDialContext_TCP(t *testing.T) {
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestDialContext_AsyncDNSRuntime(t *testing.T) {
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	defer tcpLn.Close()
+
+	accepted := make(chan error, 1)
+	go func() {
+		conn, err := tcpLn.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+		accepted <- err
+	}()
+
+	dnsLn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer dnsLn.Close()
+
+	const host = "dialer-test.local"
+	go serveTestDNS(t, dnsLn, host+".", net.IPv4(127, 0, 0, 1))
+
+	_, port, _ := net.SplitHostPort(tcpLn.Addr().String())
+	d, err := NewDialer(DialerConfig{
+		Timeout:        5 * time.Second,
+		AsyncDNS:       true,
+		AsyncDNSServer: dnsLn.LocalAddr().String(),
+	})
+	if err != nil {
+		t.Fatalf("NewDialer: %v", err)
+	}
+	defer d.Close()
+
+	conn, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		t.Fatalf("DialContext async DNS: %v", err)
+	}
+	_ = conn.Close()
+
+	if err := <-accepted; err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+}
+
+func serveTestDNS(t *testing.T, conn net.PacketConn, fqdn string, ip net.IP) {
+	t.Helper()
+
+	buf := make([]byte, 1500)
+	n, addr, err := conn.ReadFrom(buf)
+	if err != nil {
+		return
+	}
+
+	var parser dnsmessage.Parser
+	header, err := parser.Start(buf[:n])
+	if err != nil {
+		t.Errorf("dns parser start: %v", err)
+		return
+	}
+	question, err := parser.Question()
+	if err != nil {
+		t.Errorf("dns parser question: %v", err)
+		return
+	}
+	if question.Type != dnsmessage.TypeA || question.Name.String() != fqdn {
+		t.Errorf("unexpected dns question: %#v", question)
+		return
+	}
+
+	respHeader := dnsmessage.Header{
+		ID:                 header.ID,
+		Response:           true,
+		RecursionAvailable: true,
+	}
+	builder := dnsmessage.NewBuilder(nil, respHeader)
+	builder.EnableCompression()
+	if err := builder.StartQuestions(); err != nil {
+		t.Errorf("dns start questions: %v", err)
+		return
+	}
+	if err := builder.Question(question); err != nil {
+		t.Errorf("dns question echo: %v", err)
+		return
+	}
+	if err := builder.StartAnswers(); err != nil {
+		t.Errorf("dns start answers: %v", err)
+		return
+	}
+	var a [4]byte
+	copy(a[:], ip.To4())
+	if err := builder.AResource(dnsmessage.ResourceHeader{
+		Name:  question.Name,
+		Type:  dnsmessage.TypeA,
+		Class: dnsmessage.ClassINET,
+		TTL:   30,
+	}, dnsmessage.AResource{A: a}); err != nil {
+		t.Errorf("dns answer: %v", err)
+		return
+	}
+	resp, err := builder.Finish()
+	if err != nil {
+		t.Errorf("dns finish: %v", err)
+		return
+	}
+	_, _ = conn.WriteTo(resp, addr)
 }
 
 func TestDialContext_LocalAddr(t *testing.T) {
@@ -342,6 +515,38 @@ func TestDialContext_PreferIPv4(t *testing.T) {
 
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDialContext_DisableIPv6BlocksExplicitLiteral(t *testing.T) {
+	d, err := NewDialer(DialerConfig{
+		Timeout:     5 * time.Second,
+		DisableIPv6: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	_, err = d.DialContext(context.Background(), "tcp", "[::1]:21")
+	if err == nil || !strings.Contains(err.Error(), "IPv6 disabled") {
+		t.Fatalf("DialContext() error = %v, want IPv6 disabled", err)
+	}
+}
+
+func TestDialUDP_DisableIPv6BlocksExplicitLiteral(t *testing.T) {
+	d, err := NewDialer(DialerConfig{
+		Timeout:     5 * time.Second,
+		DisableIPv6: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	_, err = d.DialUDP(context.Background(), "[::1]:21")
+	if err == nil || !strings.Contains(err.Error(), "IPv6 disabled") {
+		t.Fatalf("DialUDP() error = %v, want IPv6 disabled", err)
 	}
 }
 

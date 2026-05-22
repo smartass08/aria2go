@@ -1,0 +1,59 @@
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --border: #30363d;
+  --fg: #e6edf3;
+  --muted: #8b949e;
+  --aria2c: #f97583;
+  --aria2go: #79c0ff;
+  --ok: #56d364;
+  --warn: #e3b341;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 16px 24px;
+  background: var(--bg); color: var(--fg);
+  font-family: -apple-system, system-ui, "Segoe UI", monospace;
+  font-size: 14px;
+}
+header { border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; }
+header h1 { margin: 0 0 6px 0; font-size: 20px; }
+.meta { display: flex; gap: 20px; color: var(--muted); font-size: 13px; }
+.meta b { color: var(--fg); }
+
+.status {
+  padding: 2px 10px; border-radius: 12px; font-size: 12px;
+  font-weight: 600; text-transform: uppercase;
+}
+.status.idling { background: #30363d; color: #8b949e; }
+.status.running { background: #1f6feb; color: white; animation: pulse 1.6s infinite; }
+.status.done { background: #238636; color: white; }
+@keyframes pulse { 50% { opacity: 0.7; } }
+
+.scenario-box {
+  display: flex; gap: 10px; align-items: center;
+  background: var(--panel); padding: 10px 14px; border-radius: 6px;
+  border: 1px solid var(--border); margin-top: 8px;
+}
+.tag {
+  padding: 3px 10px; border-radius: 4px; font-size: 12px;
+  background: #21262d; color: var(--fg); font-family: monospace;
+}
+.tag.aria2c { background: #5a2030; color: var(--aria2c); }
+.tag.aria2go { background: #1f3a5f; color: var(--aria2go); }
+
+.grids { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+.chart-card {
+  background: var(--panel); padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.chart-card h3 { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); font-weight: 500; }
+.chart-card canvas { width: 100% !important; height: 180px !important; }
+
+section.summary { margin-top: 20px; }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+th, td { text-align: left; padding: 8px 10px; font-size: 13px; }
+th { border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 500; }
+tbody tr { border-bottom: 1px solid #21262d; }
+tbody tr:hover { background: #161b22; }

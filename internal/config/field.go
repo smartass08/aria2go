@@ -471,11 +471,51 @@ func buildFieldMaps() {
 			o.EnableDHT6 = b
 			return nil
 		},
-		"dht-listen-port":     func(o *Options, v string) error { o.DHTListenPort = v; return nil },
-		"dht-listen-addr":     func(o *Options, v string) error { o.DHTListenAddr = v; return nil },
-		"dht-listen-addr6":    func(o *Options, v string) error { o.DHTListenAddr6 = v; return nil },
-		"dht-entry-point":     func(o *Options, v string) error { o.DHTEntryPoint = append(o.DHTEntryPoint, v); return nil },
-		"dht-entry-point6":    func(o *Options, v string) error { o.DHTEntryPoint6 = append(o.DHTEntryPoint6, v); return nil },
+		"dht-listen-port":  func(o *Options, v string) error { o.DHTListenPort = v; return nil },
+		"dht-listen-addr":  func(o *Options, v string) error { o.DHTListenAddr = v; return nil },
+		"dht-listen-addr6": func(o *Options, v string) error { o.DHTListenAddr6 = v; return nil },
+		"dht-entry-point-host": func(o *Options, v string) error {
+			o.DHTEntryPointHost = v
+			return nil
+		},
+		"dht-entry-point-port": func(o *Options, v string) error {
+			if err := validateDHTEntryPointPort("dht-entry-point", v); err != nil {
+				return err
+			}
+			o.DHTEntryPointPort = v
+			return nil
+		},
+		"dht-entry-point": func(o *Options, v string) error {
+			host, port, err := parseDHTEntryPointValue("dht-entry-point", v)
+			if err != nil {
+				return err
+			}
+			o.DHTEntryPoint = append(o.DHTEntryPoint, v)
+			o.DHTEntryPointHost = host
+			o.DHTEntryPointPort = port
+			return nil
+		},
+		"dht-entry-point-host6": func(o *Options, v string) error {
+			o.DHTEntryPointHost6 = v
+			return nil
+		},
+		"dht-entry-point-port6": func(o *Options, v string) error {
+			if err := validateDHTEntryPointPort("dht-entry-point6", v); err != nil {
+				return err
+			}
+			o.DHTEntryPointPort6 = v
+			return nil
+		},
+		"dht-entry-point6": func(o *Options, v string) error {
+			host, port, err := parseDHTEntryPointValue("dht-entry-point6", v)
+			if err != nil {
+				return err
+			}
+			o.DHTEntryPoint6 = append(o.DHTEntryPoint6, v)
+			o.DHTEntryPointHost6 = host
+			o.DHTEntryPointPort6 = port
+			return nil
+		},
 		"dht-file-path":       func(o *Options, v string) error { o.DHTFilePath = v; return nil },
 		"dht-file-path6":      func(o *Options, v string) error { o.DHTFilePath6 = v; return nil },
 		"dht-message-timeout": func(o *Options, v string) error { o.DHTMessageTimeout = v; return nil },
@@ -1434,9 +1474,29 @@ func buildFieldMaps() {
 				d.DHTListenAddr6 = s.DHTListenAddr6
 			}
 		},
+		"dht-entry-point-host": func(d, s *Options) {
+			if s.DHTEntryPointHost != "" {
+				d.DHTEntryPointHost = s.DHTEntryPointHost
+			}
+		},
+		"dht-entry-point-port": func(d, s *Options) {
+			if s.DHTEntryPointPort != "" {
+				d.DHTEntryPointPort = s.DHTEntryPointPort
+			}
+		},
 		"dht-entry-point": func(d, s *Options) {
 			if len(s.DHTEntryPoint) > 0 {
 				d.DHTEntryPoint = append(d.DHTEntryPoint, s.DHTEntryPoint...)
+			}
+		},
+		"dht-entry-point-host6": func(d, s *Options) {
+			if s.DHTEntryPointHost6 != "" {
+				d.DHTEntryPointHost6 = s.DHTEntryPointHost6
+			}
+		},
+		"dht-entry-point-port6": func(d, s *Options) {
+			if s.DHTEntryPointPort6 != "" {
+				d.DHTEntryPointPort6 = s.DHTEntryPointPort6
 			}
 		},
 		"dht-entry-point6": func(d, s *Options) {

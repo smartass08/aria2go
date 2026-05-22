@@ -136,6 +136,34 @@ func TestDecodeBatchEmpty(t *testing.T) {
 	}
 }
 
+func TestDecodeBatchRetainsPerEntryValidationErrors(t *testing.T) {
+	data := []byte(`[
+		{"jsonrpc":"2.0","id":"ok","method":"aria2.getVersion","params":[]},
+		{"jsonrpc":"2.0","id":"bad-method"},
+		42,
+		{"jsonrpc":"2.0","id":"bad-params","method":"aria2.getVersion","params":{"k":"v"}}
+	]`)
+	single, batch, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if single != nil {
+		t.Fatal("expected nil single")
+	}
+	if len(batch) != 3 {
+		t.Fatalf("batch len = %d, want 3", len(batch))
+	}
+	if batch[0].ValidationError != nil {
+		t.Fatalf("batch[0] unexpected validation error: %+v", batch[0].ValidationError)
+	}
+	if batch[1].ValidationError == nil || batch[1].ValidationError.Code != ErrCodeInvalidRequest {
+		t.Fatalf("batch[1] validation error = %+v, want invalid request", batch[1].ValidationError)
+	}
+	if batch[2].ValidationError == nil || batch[2].ValidationError.Code != ErrCodeInvalidParams {
+		t.Fatalf("batch[2] validation error = %+v, want invalid params", batch[2].ValidationError)
+	}
+}
+
 // ---- Decode (jsonrpc field optional) ----
 
 func TestDecodeOptionalJSONRPC(t *testing.T) {
@@ -181,9 +209,18 @@ func TestDecodeInvalidJSON(t *testing.T) {
 
 func TestDecodeNonObjectNonArray(t *testing.T) {
 	data := []byte(`"just a string"`)
-	_, _, err := Decode(data)
-	if err == nil {
-		t.Fatal("expected parse error")
+	single, batch, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if batch != nil {
+		t.Fatalf("batch = %#v, want nil", batch)
+	}
+	if single == nil {
+		t.Fatal("single = nil, want invalid request sentinel")
+	}
+	if single.ValidationError == nil || single.ValidationError.Code != ErrCodeInvalidRequest {
+		t.Fatalf("validation error = %+v, want invalid request", single.ValidationError)
 	}
 }
 
@@ -197,25 +234,49 @@ func TestDecodeEmptyBody(t *testing.T) {
 
 func TestDecodeMissingMethod(t *testing.T) {
 	data := []byte(`{"jsonrpc":"2.0","id":"1"}`)
-	_, _, err := Decode(data)
-	if err == nil {
-		t.Fatal("expected invalid request error")
+	single, _, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if single == nil {
+		t.Fatal("single = nil, want request with validation error")
+	}
+	if single.ValidationError == nil || single.ValidationError.Code != ErrCodeInvalidRequest {
+		t.Fatalf("validation error = %+v, want invalid request", single.ValidationError)
+	}
+	if string(single.ID) != `"1"` {
+		t.Fatalf("id = %s, want %q", string(single.ID), `"1"`)
 	}
 }
 
 func TestDecodeMethodNotString(t *testing.T) {
 	data := []byte(`{"jsonrpc":"2.0","id":"1","method":42}`)
-	_, _, err := Decode(data)
-	if err == nil {
-		t.Fatal("expected invalid request error")
+	single, _, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if single == nil {
+		t.Fatal("single = nil, want request with validation error")
+	}
+	if single.ValidationError == nil || single.ValidationError.Code != ErrCodeInvalidRequest {
+		t.Fatalf("validation error = %+v, want invalid request", single.ValidationError)
 	}
 }
 
 func TestDecodeParamsIsObject(t *testing.T) {
 	data := []byte(`{"jsonrpc":"2.0","id":"1","method":"aria2.getVersion","params":{"key":"val"}}`)
-	_, _, err := Decode(data)
-	if err == nil {
-		t.Fatal("expected invalid params error")
+	single, _, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if single == nil {
+		t.Fatal("single = nil, want request with validation error")
+	}
+	if single.ValidationError == nil || single.ValidationError.Code != ErrCodeInvalidParams {
+		t.Fatalf("validation error = %+v, want invalid params", single.ValidationError)
+	}
+	if string(single.ID) != `"1"` {
+		t.Fatalf("id = %s, want %q", string(single.ID), `"1"`)
 	}
 }
 

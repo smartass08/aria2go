@@ -15,11 +15,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	ariabase64 "github.com/smartass08/aria2go/internal/encoding/base64"
 	"github.com/smartass08/aria2go/internal/rpc/jsonrpc"
 	"github.com/smartass08/aria2go/internal/rpc/xmlrpc"
 )
@@ -296,71 +296,113 @@ func decodeJSONPQuery(query string) (body []byte, callback string) {
 	if query == "" {
 		return nil, ""
 	}
+
 	query = strings.TrimPrefix(query, "?")
-	values, err := url.ParseQuery(query)
-	if err != nil {
-		return nil, ""
-	}
-
 	var method, id, paramsStr string
-	for k, v := range values {
-		if len(v) == 0 {
-			continue
+	var hasMethod, hasID, hasParams bool
+	for len(query) > 0 {
+		part := query
+		if amp := strings.IndexByte(query, '&'); amp >= 0 {
+			part = query[:amp]
+			query = query[amp+1:]
+		} else {
+			query = ""
 		}
-		switch k {
-		case "method":
-			method = v[0]
-		case "id":
-			id = v[0]
-		case "params":
-			paramsStr = v[0]
-		case "jsoncallback":
-			callback = v[0]
+		switch {
+		case strings.HasPrefix(part, "method="):
+			hasMethod = true
+			method = part[len("method="):]
+		case strings.HasPrefix(part, "id="):
+			hasID = true
+			id = part[len("id="):]
+		case strings.HasPrefix(part, "params="):
+			hasParams = true
+			paramsStr = part[len("params="):]
+		case strings.HasPrefix(part, "jsoncallback="):
+			callback = part[len("jsoncallback="):]
 		}
 	}
 
-	// Decode params: URL-decode then base64-decode.
-	decodedParam, err := url.QueryUnescape(paramsStr)
-	if err != nil {
-		decodedParam = paramsStr
-	}
-	jsonParam, err := base64.StdEncoding.DecodeString(decodedParam)
-	if err != nil {
-		jsonParam = []byte(decodedParam)
-	}
-
-	if method == "" && id == "" {
+	jsonParam := decodeJSONPParam(paramsStr)
+	if !hasMethod && !hasID {
 		// Batch call: params is the raw JSON.
-		return jsonParam, callback
+		return []byte(jsonParam), callback
 	}
 
-	// Build a single JSON-RPC request from query params.
+	// aria2's GET decoder preserves the raw query substrings for method and id.
+	// It also rejects method-less single requests and broken base64 params as
+	// top-level invalid requests rather than echoing the provided id.
+	if !hasMethod || (hasParams && jsonParam == "") {
+		return []byte(`{}`), callback
+	}
+
 	var buf bytes.Buffer
 	buf.WriteString("{")
-	if method != "" {
-		buf.WriteString(`"method":"` + jsonEscapeParam(method) + `"`)
+	if hasMethod {
+		buf.WriteString(`"method":"`)
+		buf.WriteString(method)
+		buf.WriteString(`"`)
 	}
-	if id != "" {
-		if method != "" {
+	if hasID {
+		if hasMethod {
 			buf.WriteString(",")
 		}
-		buf.WriteString(`"id":"` + jsonEscapeParam(id) + `"`)
+		buf.WriteString(`"id":"`)
+		buf.WriteString(id)
+		buf.WriteString(`"`)
 	}
-	if len(jsonParam) > 0 {
-		if method != "" || id != "" {
+	if hasParams {
+		if hasMethod || hasID {
 			buf.WriteString(",")
 		}
 		buf.WriteString(`"params":`)
-		buf.Write(jsonParam)
+		buf.WriteString(jsonParam)
 	}
 	buf.WriteString("}")
 	return buf.Bytes(), callback
 }
 
-func jsonEscapeParam(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return s
+func decodeJSONPParam(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	decoded, err := ariabase64.Decode(percentDecode(raw))
+	if err != nil {
+		return ""
+	}
+	return string(decoded)
+}
+
+func percentDecode(s string) string {
+	if s == "" {
+		return ""
+	}
+	var buf strings.Builder
+	buf.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' || i+2 >= len(s) || !isHex(s[i+1]) || !isHex(s[i+2]) {
+			buf.WriteByte(s[i])
+			continue
+		}
+		buf.WriteByte(fromHex(s[i+1])<<4 | fromHex(s[i+2]))
+		i += 2
+	}
+	return buf.String()
+}
+
+func isHex(b byte) bool {
+	return ('0' <= b && b <= '9') || ('a' <= b && b <= 'f') || ('A' <= b && b <= 'F')
+}
+
+func fromHex(b byte) byte {
+	switch {
+	case '0' <= b && b <= '9':
+		return b - '0'
+	case 'a' <= b && b <= 'f':
+		return b - 'a' + 10
+	default:
+		return b - 'A' + 10
+	}
 }
 
 // wrapJSONP wraps a JSON body with a JSONP callback: callback(...).
@@ -386,6 +428,20 @@ func httpStatusCode(rpcCode int) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func (s *Server) abortOversizedRequest(r *http.Request) {
+	s.logger.Info("request too long, closing without response",
+		"contentLength", r.ContentLength,
+		"maxRequestSize", s.cfg.MaxRequestSize)
+	if r.Body != nil {
+		_ = r.Body.Close()
+	}
+	panic(http.ErrAbortHandler)
+}
+
+func (s *Server) requestTooLarge(r *http.Request) bool {
+	return s.cfg.MaxRequestSize > 0 && r.ContentLength > s.cfg.MaxRequestSize
 }
 
 // handleJSONRPC handles requests to /jsonrpc.
@@ -434,11 +490,8 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce max request size for POST.
-	if s.cfg.MaxRequestSize > 0 && r.ContentLength > s.cfg.MaxRequestSize {
-		s.logger.Info("request too long, rejected",
-			"contentLength", r.ContentLength,
-			"maxRequestSize", s.cfg.MaxRequestSize)
-		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+	if s.requestTooLarge(r) {
+		s.abortOversizedRequest(r)
 		return
 	}
 
@@ -546,6 +599,10 @@ func (s *Server) handleJSONPBatch(w http.ResponseWriter, batch []jsonrpc.Request
 	unauthorized := false
 	for i := range batch {
 		req := &batch[i]
+		if req.ValidationError != nil {
+			responses = append(responses, jsonrpc.NewErrorResponse(req, req.ValidationError.Code, req.ValidationError.Message))
+			continue
+		}
 		if req.IsNotification() {
 			resp := jsonrpc.NewInvalidRequestError(nil)
 			responses = append(responses, resp)
@@ -597,6 +654,9 @@ func (s *Server) handleJSONPBatch(w http.ResponseWriter, batch []jsonrpc.Request
 // response. This is shared between POST and GET/JSONP paths.
 // Callers must handle notifications before calling this method.
 func (s *Server) processSingleJSONRPC(req *jsonrpc.Request) jsonrpc.Response {
+	if req.ValidationError != nil {
+		return jsonrpc.NewErrorResponse(req, req.ValidationError.Code, req.ValidationError.Message)
+	}
 	params, err := s.extractJSONParams(req.Params)
 	if err != nil {
 		return jsonrpc.NewErrorResponse(req, jsonrpc.ErrCodeParse, "Parse error.")
@@ -616,6 +676,11 @@ func (s *Server) processSingleJSONRPC(req *jsonrpc.Request) jsonrpc.Response {
 }
 
 func (s *Server) handleSingleJSONRPC(w http.ResponseWriter, r *http.Request, req *jsonrpc.Request, origin string) {
+	if req.ValidationError != nil {
+		resp := jsonrpc.NewErrorResponse(req, req.ValidationError.Code, req.ValidationError.Message)
+		s.writeJSONResponse(w, resp, httpStatusCode(resp.Error.Code), origin, false)
+		return
+	}
 	if req.IsNotification() {
 		resp := jsonrpc.NewInvalidRequestError(nil)
 		s.writeJSONResponse(w, resp, http.StatusBadRequest, origin, false)
@@ -653,6 +718,10 @@ func (s *Server) handleBatchJSONRPC(w http.ResponseWriter, r *http.Request, batc
 	unauthorized := false
 	for i := range batch {
 		req := &batch[i]
+		if req.ValidationError != nil {
+			responses = append(responses, jsonrpc.NewErrorResponse(req, req.ValidationError.Code, req.ValidationError.Message))
+			continue
+		}
 		if req.IsNotification() {
 			resp := jsonrpc.NewInvalidRequestError(nil)
 			responses = append(responses, resp)
@@ -741,6 +810,11 @@ func (s *Server) handleXMLRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.requestTooLarge(r) {
+		s.abortOversizedRequest(r)
+		return
+	}
+
 	body, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
@@ -753,6 +827,7 @@ func (s *Server) handleXMLRPC(w http.ResponseWriter, r *http.Request) {
 		s.writePlainError(w, "Bad Request", http.StatusBadRequest, origin)
 		return
 	}
+	call.Params = normalizeXMLRPCUploadParams(call.MethodName, call.Params)
 
 	if requiresSecretToken(call.MethodName) && !s.authenticate(call.Params) {
 		time.Sleep(1 * time.Second)
@@ -777,6 +852,28 @@ func (s *Server) handleXMLRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeXMLBytes(w, buf.Bytes(), origin)
 	xmlBufPool.Put(buf)
+}
+
+func normalizeXMLRPCUploadParams(method string, params []any) []any {
+	if method != "aria2.addTorrent" && method != "aria2.addMetalink" {
+		return params
+	}
+	payloadIndex := 0
+	if len(params) > 0 {
+		if token, ok := params[0].(string); ok && strings.HasPrefix(token, jsonrpc.TokenPrefix) {
+			payloadIndex = 1
+		}
+	}
+	if payloadIndex >= len(params) {
+		return params
+	}
+	payload, ok := params[payloadIndex].(string)
+	if !ok {
+		return params
+	}
+	normalized := append([]any(nil), params...)
+	normalized[payloadIndex] = ariabase64.Encode([]byte(payload))
+	return normalized
 }
 
 // handleRoot handles requests to /. Only returns 404 (matches aria2 behavior).

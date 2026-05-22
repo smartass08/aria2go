@@ -1,0 +1,2150 @@
+{
+  "schema_version": 1,
+  "status_values": [
+    "implemented",
+    "partial",
+    "missing",
+    "tests-only",
+    "not-applicable"
+  ],
+  "option_inventory": {
+    "bt.local-torrent-download": [
+      "bt-max-peers",
+      "bt-request-peer-speed-limit",
+      "bt-timeout",
+      "bt-request-timeout",
+      "bt-keep-alive-interval",
+      "peer-connection-timeout",
+      "bt-prioritize-piece",
+      "bt-hash-check-seed",
+      "bt-seed-unverified",
+      "bt-max-open-files",
+      "bt-enable-hook-after-hash-check",
+      "peer-id-prefix",
+      "peer-agent",
+      "listen-port",
+      "torrent-file",
+      "follow-torrent"
+    ],
+    "bt.local-peer-discovery": [
+      "bt-enable-lpd",
+      "bt-lpd-interface"
+    ],
+    "bt.show-files.torrent": [
+      "show-files"
+    ],
+    "bt.select-file-index-out": [
+      "select-file",
+      "index-out"
+    ],
+    "bt.magnet-runtime": [
+      "bt-metadata-only",
+      "bt-save-metadata",
+      "bt-load-saved-metadata"
+    ],
+    "bt.pause-metadata-runtime": [
+      "pause-metadata"
+    ],
+    "bt.dht-peer-discovery": [
+      "enable-dht",
+      "enable-dht6",
+      "dht-listen-port",
+      "dht-listen-addr",
+      "dht-listen-addr6",
+      "dht-entry-point",
+      "dht-entry-point6",
+      "dht-file-path",
+      "dht-file-path6",
+      "dht-message-timeout"
+    ],
+    "config.dht-entry-point-split-host-port": [
+      "dht-entry-point-host",
+      "dht-entry-point-port",
+      "dht-entry-point-host6",
+      "dht-entry-point-port6"
+    ],
+    "bt.peer-exchange": [
+      "enable-peer-exchange"
+    ],
+    "bt.tracker-policy": [
+      "bt-tracker",
+      "bt-exclude-tracker",
+      "bt-tracker-connect-timeout",
+      "bt-tracker-timeout",
+      "bt-tracker-interval"
+    ],
+    "bt.seeding-runtime": [
+      "seed-ratio",
+      "seed-time",
+      "bt-stop-timeout",
+      "bt-detach-seed-only"
+    ],
+    "bt.encryption-runtime": [
+      "bt-force-encryption",
+      "bt-require-crypto",
+      "bt-min-crypto-level",
+      "bt-external-ip"
+    ],
+    "bt.remove-unselected-file": [
+      "bt-remove-unselected-file"
+    ],
+    "download.http-basic": [
+      "dir",
+      "connect-timeout",
+      "dns-timeout",
+      "timeout"
+    ],
+    "download.http-range-split": [
+      "split",
+      "min-split-size",
+      "continue",
+      "allow-piece-length-change",
+      "always-resume",
+      "max-resume-failure-tries",
+      "piece-length"
+    ],
+    "download.http-headers-auth": [
+      "http-user",
+      "http-passwd",
+      "user-agent",
+      "referer",
+      "enable-http-keep-alive",
+      "http-auth-challenge",
+      "http-no-cache",
+      "no-want-digest-header",
+      "use-head",
+      "header"
+    ],
+    "download.http-cookies-gzip-redirect": [
+      "http-accept-gzip",
+      "load-cookies",
+      "save-cookies"
+    ],
+    "download.http-output-routing": [
+      "out",
+      "allow-overwrite",
+      "auto-file-renaming",
+      "conditional-get",
+      "content-disposition-default-utf8"
+    ],
+    "download.remote-time-non-http": [
+      "remote-time"
+    ],
+    "download.ftp-passive": [
+      "ftp-user",
+      "ftp-passwd",
+      "ftp-pasv"
+    ],
+    "download.sftp-password-hostkey": [
+      "ssh-host-key-md",
+      "netrc-path",
+      "no-netrc"
+    ],
+    "download.input-file-basic": [
+      "input-file",
+      "force-sequential"
+    ],
+    "download.parameterized-uri": [
+      "parameterized-uri"
+    ],
+    "download.deferred-input": [
+      "deferred-input"
+    ],
+    "download.retry-policy": [
+      "max-tries",
+      "retry-wait",
+      "max-file-not-found"
+    ],
+    "download.checksum-integrity": [
+      "check-integrity",
+      "checksum",
+      "realtime-chunk-checksum",
+      "hash-check-only"
+    ],
+    "download.http-pipelining": [
+      "enable-http-pipelining",
+      "max-http-pipelining"
+    ],
+    "download.lowest-speed-limit": [
+      "lowest-speed-limit"
+    ],
+    "download.uri-selector-server-stat": [
+      "reuse-uri",
+      "uri-selector",
+      "stream-piece-selector",
+      "server-stat-of",
+      "server-stat-if",
+      "server-stat-timeout",
+      "select-least-used-host"
+    ],
+    "download.connection-limits": [
+      "max-concurrent-downloads",
+      "max-connection-per-server",
+      "optimize-concurrent-downloads",
+      "optimize-concurrent-downloads-coeffA",
+      "optimize-concurrent-downloads-coeffB"
+    ],
+    "download.file-allocation": [
+      "disk-cache",
+      "file-allocation",
+      "no-file-allocation-limit",
+      "enable-mmap",
+      "max-mmap-limit"
+    ],
+    "download.rate-limits": [
+      "max-overall-download-limit",
+      "max-download-limit",
+      "max-overall-upload-limit",
+      "max-upload-limit"
+    ],
+    "download.proxy-routing": [
+      "http-proxy",
+      "http-proxy-user",
+      "http-proxy-passwd",
+      "https-proxy",
+      "https-proxy-user",
+      "https-proxy-passwd",
+      "ftp-proxy",
+      "ftp-proxy-user",
+      "ftp-proxy-passwd",
+      "all-proxy",
+      "all-proxy-user",
+      "all-proxy-passwd",
+      "no-proxy",
+      "proxy-method"
+    ],
+    "download.network-socket-options": [
+      "interface",
+      "multiple-interface",
+      "disable-ipv6",
+      "dscp",
+      "socket-recv-buffer-size"
+    ],
+    "download.https-tls": [
+      "ca-certificate",
+      "certificate",
+      "check-certificate",
+      "private-key",
+      "min-tls-version"
+    ],
+    "net.async-dns-runtime": [
+      "async-dns",
+      "enable-async-dns6",
+      "async-dns-server"
+    ],
+    "download.dry-run": [
+      "dry-run"
+    ],
+    "ftp.advanced-options": [
+      "ftp-type",
+      "ftp-reuse-connection"
+    ],
+    "metalink.single-http-download": [
+      "metalink-file",
+      "follow-metalink"
+    ],
+    "metalink.filters-mirrors": [
+      "metalink-base-uri",
+      "metalink-language",
+      "metalink-location",
+      "metalink-os",
+      "metalink-version",
+      "metalink-preferred-protocol",
+      "metalink-enable-unique-protocol"
+    ],
+    "session.basic-save-load": [
+      "save-session",
+      "save-session-interval",
+      "auto-save-interval",
+      "force-save",
+      "save-not-found",
+      "remove-control-file",
+      "keep-unfinished-download-result",
+      "max-download-result",
+      "gid",
+      "pause"
+    ],
+    "progress.console-readout": [
+      "quiet",
+      "show-console-readout",
+      "truncate-console-readout",
+      "human-readable",
+      "download-result",
+      "stderr",
+      "enable-color"
+    ],
+    "progress.summary-interval": [
+      "summary-interval"
+    ],
+    "cli.config-file-basics": [
+      "conf-path",
+      "no-conf",
+      "log",
+      "log-level",
+      "console-log-level"
+    ],
+    "cli.stop-timers": [
+      "stop",
+      "stop-with-process"
+    ],
+    "engine.lifecycle-options": [
+      "daemon",
+      "startup-idle-time",
+      "event-poll",
+      "rlimit-nofile"
+    ],
+    "hooks.basic-events": [
+      "on-download-start",
+      "on-download-complete",
+      "on-download-error"
+    ],
+    "hooks.pause-stop-bt-complete": [
+      "on-download-pause",
+      "on-download-stop",
+      "on-bt-download-complete"
+    ],
+    "rpc.auth-readonly": [
+      "enable-rpc",
+      "rpc-listen-port",
+      "rpc-listen-all",
+      "rpc-allow-origin-all",
+      "rpc-secret",
+      "rpc-user",
+      "rpc-passwd",
+      "rpc-max-request-size"
+    ],
+    "rpc.secure-transport": [
+      "rpc-secure",
+      "rpc-certificate",
+      "rpc-private-key"
+    ],
+    "rpc.uploaded-metadata": [
+      "rpc-save-upload-metadata"
+    ]
+  },
+  "rpc_inventory": {
+    "rpc.method-registry": [
+      "system.listMethods",
+      "system.listNotifications"
+    ],
+    "rpc.add-uri-status-queue": [
+      "aria2.addUri",
+      "aria2.tellStatus",
+      "aria2.tellActive",
+      "aria2.tellWaiting",
+      "aria2.tellStopped",
+      "aria2.pause",
+      "aria2.pauseAll",
+      "aria2.unpause",
+      "aria2.unpauseAll",
+      "aria2.remove",
+      "aria2.forceRemove",
+      "aria2.forcePause",
+      "aria2.forcePauseAll",
+      "aria2.changePosition",
+      "aria2.changeUri",
+      "aria2.purgeDownloadResult",
+      "aria2.removeDownloadResult",
+      "aria2.shutdown",
+      "aria2.forceShutdown"
+    ],
+    "rpc.files-uris-servers": [
+      "aria2.getFiles",
+      "aria2.getUris",
+      "aria2.getServers",
+      "aria2.getGlobalStat",
+      "aria2.getVersion",
+      "aria2.getSessionInfo",
+      "aria2.getOption",
+      "aria2.getGlobalOption"
+    ],
+    "rpc.uploaded-metadata": [
+      "aria2.addTorrent",
+      "aria2.addMetalink"
+    ],
+    "rpc.transports": [
+      "system.multicall"
+    ],
+    "rpc.option-validation": [
+      "aria2.changeOption"
+    ],
+    "rpc.change-global-runtime-effects": [
+      "aria2.changeGlobalOption"
+    ],
+    "rpc.get-peers": [
+      "aria2.getPeers"
+    ],
+    "session.basic-save-load": [
+      "aria2.saveSession"
+    ]
+  },
+  "rpc_notification_inventory": {
+    "rpc.notifications": [
+      "aria2.onDownloadStart",
+      "aria2.onDownloadPause",
+      "aria2.onDownloadStop",
+      "aria2.onDownloadComplete",
+      "aria2.onDownloadError",
+      "aria2.onBtDownloadComplete"
+    ]
+  },
+  "source_option_exceptions": {
+    "": "source-truth internal null preference sentinel",
+    "help": "cli.help-version",
+    "version": "cli.help-version",
+    "max-downloads": "source-truth pref without a user-facing OptionHandler; Go tracks max-concurrent-downloads"
+  },
+  "entries": [
+    {
+      "id": "bt.local-torrent-download",
+      "area": "BitTorrent",
+      "feature": "Local .torrent single-file download over TCP peers",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/download_helper.h",
+        "source-truth/aria2/src/DefaultBtAnnounce.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:3515",
+        "internal/engine/bt_download.go:719",
+        "internal/engine/bt_download.go:806",
+        "internal/engine/bt_download.go:929"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_download_test.go:13"
+      ],
+      "unit_coverage": [
+        "internal/engine/engine_test.go:2369",
+        "internal/engine/bt_download_test.go:12"
+      ],
+      "notes": "This claim is limited to local torrent metadata and TCP peer transfer."
+    },
+    {
+      "id": "bt.local-peer-discovery",
+      "area": "BitTorrent",
+      "feature": "Local Peer Discovery announcements and peer intake",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/LpdMessageReceiver.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:431",
+        "internal/engine/engine.go:794",
+        "internal/engine/bt_download.go:473",
+        "internal/lpd/lpd.go:1"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/lpd/lpd_test.go:1"
+      ],
+      "notes": "LPD listener and announce plumbing exist, but interface selection and peer intake are not covered by offline conformance."
+    },
+    {
+      "id": "bt.show-files.torrent",
+      "area": "BitTorrent",
+      "feature": "Torrent --show-files output",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/Context.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:956",
+        "cmd/aria2go/main.go:974"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_options_test.go:24"
+      ],
+      "unit_coverage": [
+        "cmd/aria2go/main_test.go:364"
+      ],
+      "notes": "Conformance normalizes known stdout ordering differences from the reference binary."
+    },
+    {
+      "id": "bt.select-file-index-out",
+      "area": "BitTorrent",
+      "feature": "Multi-file torrent --select-file and --index-out",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/bittorrent_helper.cc"
+      ],
+      "evidence": [
+        "internal/engine/bt_download.go:729",
+        "internal/engine/bt_download.go:1607",
+        "internal/engine/bt_download.go:1617",
+        "internal/engine/bt_download.go:1629"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_options_test.go:67",
+        "test/conformance/bittorrent_options_test.go:131"
+      ],
+      "unit_coverage": [
+        "internal/engine/bt_download_test.go:34"
+      ],
+      "notes": "Covers selection and output remapping for multi-file torrents."
+    },
+    {
+      "id": "bt.magnet-runtime",
+      "area": "BitTorrent",
+      "feature": "Magnet URI download",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/DefaultExtensionMessageFactory.cc",
+        "source-truth/aria2/src/ExtensionMessageRegistry.cc"
+      ],
+      "evidence": [
+        "internal/magnet/magnet.go:121",
+        "internal/magnet/magnet.go:150",
+        "internal/engine/bt_magnet.go"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_magnet_test.go:343",
+        "test/conformance/bittorrent_magnet_test.go:368"
+      ],
+      "unit_coverage": [
+        "internal/magnet/magnet_test.go:33",
+        "internal/engine/bt_magnet_test.go:338",
+        "internal/engine/bt_magnet_test.go:396"
+      ],
+      "notes": "Tracker-backed ut_metadata download and metadata-only/save flows are conformance-covered. Saved-metadata reload has engine runtime tests, so this row stays partial until that path is exercised against aria2c."
+    },
+    {
+      "id": "bt.pause-metadata-runtime",
+      "area": "BitTorrent",
+      "feature": "pause-metadata runtime behavior for metadata downloads",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/OptionHandlerFactory.cc",
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/config/field.go:568",
+        "cmd/aria2go/main.go:562",
+        "internal/engine/bt_magnet.go"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_magnet_test.go:421"
+      ],
+      "unit_coverage": [
+        "internal/engine/bt_magnet_test.go:446"
+      ],
+      "notes": "Conformance covers the paused child request-group created after metadata retrieval in RPC mode."
+    },
+    {
+      "id": "bt.ut-metadata",
+      "area": "BitTorrent",
+      "feature": "BEP 9 / ut_metadata torrent metadata exchange",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/DefaultExtensionMessageFactory.cc",
+        "source-truth/aria2/src/ExtensionMessageRegistry.cc",
+        "source-truth/aria2/src/UTMetadataPostDownloadHandler.cc"
+      ],
+      "evidence": [
+        "internal/engine/bt_magnet.go",
+        "internal/protocol/bittorrent/peer/extensions.go",
+        "internal/engine/bt_download.go:775"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_magnet_test.go:343"
+      ],
+      "unit_coverage": [
+        "internal/protocol/bittorrent/peer/extensions_test.go:58",
+        "internal/engine/bt_magnet_test.go:338"
+      ],
+      "notes": "Conformance covers metadata bootstrap from a local peer fixture using ut_metadata."
+    },
+    {
+      "id": "bt.dht-peer-discovery",
+      "area": "BitTorrent",
+      "feature": "DHT peer discovery feeding BitTorrent swarms",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/DHTPeerLookupTask.h",
+        "source-truth/aria2/src/DHTMessageFactory.h",
+        "source-truth/aria2/src/DHTSetup.cc",
+        "source-truth/aria2/src/BtPortMessage.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:520",
+        "internal/engine/engine.go:523",
+        "internal/engine/bt_download.go:610",
+        "internal/engine/bt_download.go:838",
+        "internal/engine/bt_download.go:885",
+        "internal/engine/bt_download.go:1486",
+        "internal/engine/bt_discovery.go:502"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/dht/dht_test.go:154",
+        "internal/engine/engine_dht_test.go:9"
+      ],
+      "notes": "DHT bootstrap, periodic get-peers/announce, and PORT-message observation are wired and unit-covered for active swarms. This stays partial because cross-binary conformance has not been added and the wider IPv6/listener parity surface is still incomplete."
+    },
+    {
+      "id": "config.dht-entry-point-split-host-port",
+      "area": "Config",
+      "feature": "Internal split dht-entry-point host/port prefs",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/prefs.cc",
+        "source-truth/aria2/src/OptionHandlerFactory.cc"
+      ],
+      "evidence": [
+        "internal/config/options.go:148",
+        "internal/config/parse_args.go:59",
+        "internal/config/parse_conf.go:32"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [],
+      "notes": "Go keeps hidden split host/port prefs in its config inventory for lifecycle plumbing. This entry only classifies those internal knobs; runtime DHT entry-point parity still belongs to the combined dht-entry-point and dht-entry-point6 options under bt.dht-peer-discovery."
+    },
+    {
+      "id": "bt.peer-exchange",
+      "area": "BitTorrent",
+      "feature": "Peer exchange / ut_pex",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/ExtensionMessageRegistry.cc",
+        "source-truth/aria2/src/UTPexExtensionMessage.h"
+      ],
+      "evidence": [
+        "internal/config/field.go:522",
+        "internal/engine/bt_download.go:424",
+        "internal/engine/bt_download.go:576",
+        "internal/engine/bt_download.go:833",
+        "internal/engine/bt_download.go:1437"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/protocol/bittorrent/peer/extensions_test.go:103",
+        "internal/protocol/bittorrent/peer/peer_session_test.go:198"
+      ],
+      "notes": "ut_pex reserved-bit advertising plus send/receive handling are wired for active swarms. This stays partial because there is no cross-binary conformance fixture and no broader aria2 parity claim for PEX-driven peer acquisition yet."
+    },
+    {
+      "id": "bt.tracker-http",
+      "area": "BitTorrent",
+      "feature": "HTTP tracker announce for local .torrent downloads",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/DefaultBtAnnounce.cc"
+      ],
+      "evidence": [
+        "internal/tracker/http.go:20",
+        "internal/engine/bt_discovery.go:533",
+        "internal/engine/bt_download.go:843",
+        "internal/engine/bt_download.go:872",
+        "internal/engine/bt_download.go:950"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_download_test.go:13"
+      ],
+      "unit_coverage": [
+        "internal/tracker/tracker_test.go:414",
+        "internal/engine/bt_download_test.go:73"
+      ],
+      "notes": "This does not claim UDP tracker or full tracker policy parity."
+    },
+    {
+      "id": "bt.tracker-udp-runtime",
+      "area": "BitTorrent",
+      "feature": "UDP tracker runtime use",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/DefaultBtAnnounce.cc",
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/engine/bt_discovery.go:533",
+        "internal/tracker/udp.go:69",
+        "internal/engine/bt_download.go:843",
+        "internal/engine/bt_download.go:872"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/tracker/tracker_test.go:159"
+      ],
+      "notes": "The tracker dispatcher now routes udp:// announces through the BitTorrent runtime. This stays partial because there is still no dedicated reference-vs-Go conformance fixture for UDP tracker behavior."
+    },
+    {
+      "id": "bt.tracker-policy",
+      "area": "BitTorrent",
+      "feature": "Tracker overrides, exclusion, intervals, tiers, completed/stopped announces",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/DefaultBtAnnounce.cc",
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/bittorrent_helper.cc",
+        "source-truth/aria2/src/TrackerWatcherCommand.cc"
+      ],
+      "evidence": [
+        "internal/config/options.go:115",
+        "internal/engine/bt_download.go:817",
+        "internal/engine/bt_download.go:922"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/bt_download_test.go:73"
+      ],
+      "notes": "Basic metadata announce-list handling exists. Configured bt-tracker, bt-exclude-tracker, tracker timing knobs, tier policy, and completed/stopped announces are not fully wired."
+    },
+    {
+      "id": "bt.webseed-runtime",
+      "area": "BitTorrent",
+      "feature": "Web seed / url-list data source",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/download_helper.h"
+      ],
+      "evidence": [
+        "internal/torrent/torrent.go:47",
+        "internal/torrent/torrent.go:151",
+        "internal/engine/bt_download.go",
+        "cmd/aria2go/main.go:800",
+        "internal/engine/engine.go:2890"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_download_test.go:40"
+      ],
+      "unit_coverage": [
+        "internal/torrent/torrent_test.go:444",
+        "cmd/aria2go/main_test.go:848",
+        "internal/engine/bt_download_test.go:597",
+        "internal/engine/bt_download_test.go:709"
+      ],
+      "notes": "CLI url-list webseed download is conformance-covered and positional webseed runtime is unit-covered. Mid-download fallback and broader source-truth fallback semantics remain partial."
+    },
+    {
+      "id": "bt.seeding-runtime",
+      "area": "BitTorrent",
+      "feature": "Post-completion seeding, incoming peer listener, seed-ratio and seed-time",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/BtRegistry.h",
+        "source-truth/aria2/src/SeedCheckCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/bt_download.go:961",
+        "internal/engine/bt_download.go:972",
+        "internal/engine/bt_download.go:1059",
+        "internal/engine/bt_download.go:1667"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [],
+      "notes": "A post-completion seed loop exists and honors seed-ratio and seed-time. This remains partial because there is no cross-binary conformance yet and stricter parity for bt-stop-timeout and bt-detach-seed-only is still unproven."
+    },
+    {
+      "id": "bt.encryption-runtime",
+      "area": "BitTorrent",
+      "feature": "BitTorrent MSE/PE runtime behavior",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/DefaultPieceStorage.cc",
+        "source-truth/aria2/src/RequestGroup.cc"
+      ],
+      "evidence": [
+        "internal/mse/mse.go:19",
+        "internal/protocol/bittorrent/peer/peer.go:200",
+        "internal/engine/bt_download.go:793"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/mse/mse_test.go:18",
+        "internal/mse/mse_test.go:62"
+      ],
+      "notes": "Outbound MSE is wired. Incoming peer listener and full aria2 option semantics are not covered."
+    },
+    {
+      "id": "bt.utp-runtime",
+      "area": "BitTorrent",
+      "feature": "uTP transport",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/protocol/bittorrent/utp/utp.go:16",
+        "internal/protocol/bittorrent/peer/peer.go:195",
+        "internal/engine/bt_session.go"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/protocol/bittorrent/utp/utp_test.go:12",
+        "internal/engine/bt_session_test.go:69"
+      ],
+      "notes": "Runtime peer dials race TCP and uTP when a session uTP socket is available. End-to-end conformance and uTP listener bind-failure parity remain partial."
+    },
+    {
+      "id": "bt.remove-unselected-file",
+      "area": "BitTorrent",
+      "feature": "bt-remove-unselected-file",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/DownloadEngineFactory.cc",
+        "source-truth/aria2/src/TimedHaltCommand.cc",
+        "source-truth/aria2/src/WatchProcessCommand.cc"
+      ],
+      "evidence": [
+        "internal/config/options.go:129",
+        "internal/config/field.go:389",
+        "internal/engine/bt_download.go"
+      ],
+      "conformance_coverage": [
+        "test/conformance/bittorrent_options_test.go:94"
+      ],
+      "unit_coverage": [
+        "internal/engine/bt_download_test.go:673"
+      ],
+      "notes": "Conformance covers selecting one torrent file and removing the unselected payload files on completion."
+    },
+    {
+      "id": "download.http-basic",
+      "area": "HTTP",
+      "feature": "HTTP single-file download",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/HttpResponseCommand.cc",
+        "source-truth/aria2/src/DownloadCommand.cc",
+        "source-truth/aria2/src/AbstractCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:3609",
+        "internal/protocol/http/downloader.go:169",
+        "internal/protocol/http/downloader.go:643"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:22"
+      ],
+      "unit_coverage": [
+        "internal/protocol/http/downloader_test.go:1"
+      ],
+      "notes": "This row is limited to the basic local plain-HTTP payload path. HTTPS/TLS and the richer auth/header surface are tracked separately."
+    },
+    {
+      "id": "download.https-tls",
+      "area": "HTTP",
+      "feature": "HTTPS download and TLS certificate option behavior",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/OptionHandlerFactory.cc",
+        "source-truth/aria2/src/LibsslTLSContext.cc",
+        "source-truth/aria2/src/LibgnutlsTLSContext.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:433",
+        "internal/engine/engine.go:588",
+        "internal/engine/engine.go:3854"
+      ],
+      "conformance_coverage": [
+        "test/conformance/http_tls_test.go:19"
+      ],
+      "unit_coverage": [
+        "internal/engine/engine_net_test.go:54",
+        "internal/tlsx/pkcs12_test.go:12",
+        "internal/tlsx/pkcs12_test.go:29"
+      ],
+      "notes": "Conformance covers check-certificate=false, custom CA trust, and min-tls-version where the fixture can observe it. Client certificate/private-key behavior and some TLS 1.3 paths are still unit-covered or environment-limited, so this row stays partial."
+    },
+    {
+      "id": "download.http-range-split",
+      "area": "HTTP",
+      "feature": "HTTP range resume and split downloads",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/HttpResponseCommand.cc",
+        "source-truth/aria2/src/DownloadCommand.cc",
+        "source-truth/aria2/src/AbstractCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:3217",
+        "internal/engine/engine.go:3341",
+        "internal/engine/engine.go:3483"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:36",
+        "test/conformance/http_edge_matrix_test.go:147",
+        "test/conformance/http_edge_matrix_test.go:302"
+      ],
+      "unit_coverage": [
+        "internal/engine/segment_test.go:188"
+      ],
+      "notes": "Core HTTP range/split fixtures pass, including gzip/deflate full-body parity with segmented range requests disabled for encoded responses. max-resume-failure-tries and some resume fallback edge cases still differ from source truth."
+    },
+    {
+      "id": "download.http-headers-auth",
+      "area": "HTTP",
+      "feature": "HTTP headers, user-agent, referer, and basic auth",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/HttpRequest.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:3895",
+        "internal/protocol/http/downloader.go:225",
+        "internal/protocol/http/downloader.go:842",
+        "internal/protocol/http/downloader.go:1113"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:435",
+        "test/conformance/download_test.go:899",
+        "test/conformance/config_behavior_matrix_test.go:22"
+      ],
+      "unit_coverage": [
+        "internal/engine/auth_config_test.go:94"
+      ],
+      "notes": "Covers user-agent, referer, custom headers, eager basic auth, and challenge-driven auth retry behavior exercised by the offline fixtures."
+    },
+    {
+      "id": "download.http-cookies-gzip-redirect",
+      "area": "HTTP",
+      "feature": "HTTP cookies, gzip, redirects, status retry, no-proxy edge behavior",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/HttpResponseCommand.cc",
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/CookieStorage.cc",
+        "source-truth/aria2/src/Sqlite3CookieParser.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:540",
+        "internal/engine/engine.go:862",
+        "internal/protocol/http/downloader.go:253"
+      ],
+      "conformance_coverage": [
+        "test/conformance/http_edge_matrix_test.go:13",
+        "test/conformance/http_edge_matrix_test.go:62",
+        "test/conformance/http_edge_matrix_test.go:195",
+        "test/conformance/http_edge_matrix_test.go:357",
+        "test/conformance/http_tls_test.go:162",
+        "test/conformance/http_edge_matrix_test.go:412"
+      ],
+      "unit_coverage": [
+        "internal/cookies/cookies_test.go:1"
+      ],
+      "notes": "Grouped because the fixture matrix exercises them as HTTP edge behavior. Redirect limits, Netscape and Firefox/SQLite cookie load/save, gzip accepted output, status-retry edges, and no-proxy bypass are covered."
+    },
+    {
+      "id": "download.http-output-routing",
+      "area": "HTTP",
+      "feature": "HTTP output routing, overwrite, rename, resume, conditional, remote-time and content-disposition",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/HttpResponseCommand.cc",
+        "source-truth/aria2/src/HttpResponse.cc",
+        "source-truth/aria2/src/util.cc",
+        "source-truth/aria2/src/RequestGroup.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:2327",
+        "internal/engine/engine.go:3626",
+        "internal/engine/engine.go:3736",
+        "internal/engine/engine.go:3948",
+        "internal/engine/engine.go:4002"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:323",
+        "test/conformance/download_test.go:522",
+        "test/conformance/download_test.go:854",
+        "test/conformance/download_test.go:928"
+      ],
+      "unit_coverage": [
+        "internal/engine/engine_test.go:1608"
+      ],
+      "notes": "Conformance covers overwrite, auto rename, continue/resume, resume fallback to the next mirror before scratch restart, default-vs-stderr result routing, conditional requests, remote-time, and content-disposition filename handling including UTF-8 fallback policy."
+    },
+    {
+      "id": "download.remote-time-non-http",
+      "area": "Download",
+      "feature": "remote-time behavior for FTP and SFTP transfers",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/FtpNegotiationCommand.cc",
+        "source-truth/aria2/src/SftpNegotiationCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:5231",
+        "internal/engine/engine.go:5430",
+        "internal/protocol/ftp/conn.go:366",
+        "internal/protocol/sftp/sftp.go:764"
+      ],
+      "conformance_coverage": [
+        "test/conformance/protocol_download_test.go:236",
+        "test/conformance/sftp_test.go:109"
+      ],
+      "unit_coverage": [],
+      "notes": "FTP MDTM-derived mtime and SFTP remote mtime propagation are both exercised against aria2c and match the source-truth transfer paths covered by the local fixtures."
+    },
+    {
+      "id": "download.ftp-passive",
+      "area": "FTP",
+      "feature": "FTP passive single-file download",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/FtpDownloadCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:5221",
+        "internal/protocol/ftp/conn.go:391",
+        "internal/protocol/ftp/conn.go:461"
+      ],
+      "conformance_coverage": [
+        "test/conformance/protocol_download_test.go:81"
+      ],
+      "unit_coverage": [
+        "internal/protocol/ftp/conn_test.go:1"
+      ],
+      "notes": "Advanced FTP option parity is tracked separately."
+    },
+    {
+      "id": "download.sftp-password-hostkey",
+      "area": "SFTP",
+      "feature": "SFTP password authentication and host-key digest checks",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/SftpNegotiationCommand.cc",
+        "source-truth/aria2/src/SftpDownloadCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:3759",
+        "internal/protocol/sftp/sftp.go:175",
+        "internal/protocol/sftp/sftp.go:180",
+        "internal/protocol/sftp/sftp.go:369"
+      ],
+      "conformance_coverage": [
+        "test/conformance/sftp_test.go:14",
+        "test/conformance/sftp_test.go:37"
+      ],
+      "unit_coverage": [
+        "internal/protocol/sftp/sftp_test.go:1"
+      ],
+      "notes": "Windows reference builds may skip this fixture because SFTP support is build-dependent."
+    },
+    {
+      "id": "download.input-file-basic",
+      "area": "Input",
+      "feature": "Eager --input-file, stdin input, and per-entry options",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/download_helper.h",
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:239",
+        "internal/engine/engine.go:838",
+        "internal/engine/engine.go:846",
+        "internal/engine/engine.go:2040",
+        "internal/sessionfile/reader.go:20"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:684",
+        "test/conformance/config_behavior_matrix_test.go:146"
+      ],
+      "unit_coverage": [
+        "internal/engine/engine_test.go:1499"
+      ],
+      "notes": "Deferred input and error handling gaps are tracked separately."
+    },
+    {
+      "id": "download.parameterized-uri",
+      "area": "Input",
+      "feature": "Parameterized URI expansion",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:822",
+        "cmd/aria2go/main.go:858",
+        "internal/engine/engine.go:2076"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:1070"
+      ],
+      "unit_coverage": [
+        "internal/config/parse_args_test.go:567"
+      ],
+      "notes": "Covers CLI-side parameterized expansion for standalone URIs and torrent webseed inputs, plus engine-side expansion for input-file entries."
+    },
+    {
+      "id": "download.input-file-errors",
+      "area": "Input",
+      "feature": "--input-file error behavior",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/download_helper.h"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:295",
+        "internal/engine/engine.go:725"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:474"
+      ],
+      "unit_coverage": [],
+      "notes": "Missing input files now fail like aria2 in conformance. Unreadable-file timing and diagnostic parity remain partial."
+    },
+    {
+      "id": "download.deferred-input",
+      "area": "Input",
+      "feature": "--deferred-input incremental parser",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/RequestGroupMan.h",
+        "source-truth/aria2/src/option_processing.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:278",
+        "internal/engine/engine.go:1630"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:489"
+      ],
+      "unit_coverage": [
+        "internal/engine/engine_test.go:2021"
+      ],
+      "notes": "Conformance covers incremental queue promotion while the first entry blocks, and engine tests cover deferred parser refill behavior."
+    },
+    {
+      "id": "input.metadata-file-classification",
+      "area": "Input",
+      "feature": "Local .torrent and .metalink path classification inside input/session files",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/download_helper.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:1651",
+        "internal/engine/engine.go:2912",
+        "internal/engine/engine.go:2972"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/engine_test.go:1969"
+      ],
+      "notes": "Engine runtime tests cover classifying local .torrent and .metalink entries into metadata request groups. Cross-binary conformance coverage has not been added yet."
+    },
+    {
+      "id": "download.retry-policy",
+      "area": "Download",
+      "feature": "max-tries, retry-wait, and max-file-not-found across protocols",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/DownloadCommand.cc",
+        "source-truth/aria2/src/HttpSkipResponseCommand.cc",
+        "source-truth/aria2/src/AbstractCommand.cc",
+        "source-truth/aria2/src/FtpDownloadCommand.cc",
+        "source-truth/aria2/src/SftpDownloadCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:3107",
+        "internal/engine/engine.go:3646",
+        "internal/engine/engine.go:3759"
+      ],
+      "conformance_coverage": [
+        "test/conformance/http_edge_matrix_test.go:62"
+      ],
+      "unit_coverage": [],
+      "notes": "HTTP body-transfer retry coverage includes 404 max-file-not-found handling and 503/504 retry edges. FTP and SFTP retry loops remain incomplete."
+    },
+    {
+      "id": "download.checksum-integrity",
+      "area": "Download",
+      "feature": "--checksum, --check-integrity, realtime chunk checksum, and Metalink hash verification",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/ChecksumCheckIntegrityEntry.cc",
+        "source-truth/aria2/src/HttpResponseCommand.cc",
+        "source-truth/aria2/src/FtpDownloadCommand.cc",
+        "source-truth/aria2/src/SftpDownloadCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:3723",
+        "internal/engine/engine.go:3972",
+        "internal/engine/engine.go:4044",
+        "internal/engine/engine.go:4266",
+        "internal/protocol/http/downloader.go:694",
+        "internal/protocol/http/downloader.go:960"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:65",
+        "test/conformance/download_test.go:99",
+        "test/conformance/download_test.go:217",
+        "test/conformance/metalink_options_test.go:158"
+      ],
+      "unit_coverage": [
+        "internal/disk/verifier_test.go:85",
+        "internal/engine/download_runtime_test.go:16",
+        "internal/engine/download_runtime_test.go:166"
+      ],
+      "notes": "Conformance covers CLI checksum success/failure, hash-check-only complete and incomplete behavior without metadata, Digest response-header verification, and Metalink bad-hash failure. Full --check-integrity and realtime chunk checksum parity remain partial."
+    },
+    {
+      "id": "download.http-pipelining",
+      "area": "HTTP",
+      "feature": "HTTP pipelining",
+      "status": "missing",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/AbstractCommand.cc",
+        "source-truth/aria2/src/HttpResponseCommand.cc"
+      ],
+      "evidence": [
+        "internal/config/options.go:45",
+        "internal/protocol/http/downloader.go:90",
+        "internal/engine/engine.go:3195"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [],
+      "notes": "Options parse, but the HTTP driver has no pipelining mode."
+    },
+    {
+      "id": "download.lowest-speed-limit",
+      "area": "Download",
+      "feature": "lowest-speed-limit enforcement",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/HttpResponseCommand.cc"
+      ],
+      "evidence": [
+        "internal/config/field.go:269",
+        "internal/engine/engine.go:5305",
+        "internal/engine/engine.go:5483",
+        "internal/engine/engine.go:5993"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:283"
+      ],
+      "unit_coverage": [
+        "internal/engine/download_runtime_test.go:51"
+      ],
+      "notes": "Conformance covers aborting a slow HTTP transfer under lowest-speed-limit. FTP and SFTP also wire the same speed guard, but broader cross-binary coverage and adaptive-selector parity remain partial."
+    },
+    {
+      "id": "download.uri-selector-server-stat",
+      "area": "Download",
+      "feature": "URI selector, reuse-uri, stream-piece-selector, server-stat feedback",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/config/options.go:91",
+        "internal/config/options.go:93",
+        "internal/engine/server_stat.go:39",
+        "internal/engine/engine.go:3917"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/server_stat_test.go:10",
+        "internal/engine/download_runtime_test.go:88",
+        "internal/engine/download_runtime_test.go:212"
+      ],
+      "notes": "Feedback/adaptive URI selection and server-stat save/load are unit-covered. Full aria2 mirror switching semantics and FTP/SFTP retry parity remain partial."
+    },
+    {
+      "id": "download.connection-limits",
+      "area": "Download",
+      "feature": "max-concurrent-downloads and max-connection-per-server",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/config/options.go:14",
+        "internal/config/options.go:21",
+        "internal/engine/engine.go:2619",
+        "internal/engine/engine.go:3341"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/engine_test.go:927",
+        "internal/engine/download_runtime_test.go:130"
+      ],
+      "notes": "Queue concurrency is wired, and engine URI selection respects per-host caps. Broader end-to-end per-server connection parity remains partial."
+    },
+    {
+      "id": "download.file-allocation",
+      "area": "Download",
+      "feature": "File allocation modes",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/engine/download_runtime.go:168",
+        "internal/engine/bt_download.go:721",
+        "internal/engine/engine.go:4278",
+        "internal/engine/engine.go:5292",
+        "internal/engine/engine.go:5471"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/download_runtime_test.go:31",
+        "internal/disk/allocator_test.go:1"
+      ],
+      "notes": "Allocator selection now routes none, trunc, falloc, prealloc, and no-file-allocation-limit through shared runtime paths. This stays partial because allocator semantics are still only unit-covered; many conformance fixtures use file-allocation=none as harness setup rather than proving allocator behavior."
+    },
+    {
+      "id": "download.rate-limits",
+      "area": "Download",
+      "feature": "Download and upload rate limit options",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:426",
+        "internal/engine/engine.go:968",
+        "internal/engine/ratelimit.go:12"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/ratelimit_test.go:11",
+        "internal/engine/engine_test.go:1931"
+      ],
+      "notes": "Throttle objects are wired for global/per-download limits; full protocol coverage, upload-side BitTorrent behavior, and conformance timing assertions remain partial."
+    },
+    {
+      "id": "download.proxy-routing",
+      "area": "Download",
+      "feature": "Proxy option routing and no-proxy bypass behavior",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/OptionHandlerFactory.cc",
+        "source-truth/aria2/src/AbstractCommand.cc",
+        "source-truth/aria2/src/HttpRequest.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:4058",
+        "internal/engine/engine.go:4376",
+        "internal/engine/engine.go:4407",
+        "internal/netx/dialer.go:393"
+      ],
+      "conformance_coverage": [
+        "test/conformance/config_behavior_matrix_test.go:63",
+        "test/conformance/http_edge_matrix_test.go:231",
+        "test/conformance/http_edge_matrix_test.go:265",
+        "test/conformance/http_edge_matrix_test.go:412"
+      ],
+      "unit_coverage": [],
+      "notes": "HTTP proxy routing covers env/option all-proxy use, default plain-HTTP absolute-form GET, explicit tunnel CONNECT, and no-proxy bypass of invalid proxy env. FTP/SFTP proxy parity and the full proxy option family remain partial."
+    },
+    {
+      "id": "download.network-socket-options",
+      "area": "Network",
+      "feature": "Interface binding, IPv6 disable, DSCP, and socket receive buffer options",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/OptionHandlerFactory.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:569",
+        "internal/netx/dialer.go:197",
+        "internal/netx/dialer.go:357",
+        "internal/netx/dialer.go:396"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/engine_net_test.go:11",
+        "internal/netx/dialer_test.go:521",
+        "internal/netx/dialer_test.go:537",
+        "internal/netx/dialer_test.go:1038"
+      ],
+      "notes": "Engine dialer config wires interface and multiple-interface binding, hard disable-ipv6, DSCP, and socket receive buffer options into the net dialer. This stays partial because real interface-binding behavior still lacks cross-binary conformance coverage."
+    },
+    {
+      "id": "net.async-dns-runtime",
+      "area": "Network",
+      "feature": "async-dns, enable-async-dns6, and async-dns-server runtime behavior",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/OptionHandlerFactory.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:572",
+        "internal/netx/dialer.go:159",
+        "internal/netx/dialer.go:446",
+        "internal/netx/dialer.go:732"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/netx/dialer_test.go:27",
+        "internal/netx/dialer_test.go:59",
+        "internal/netx/dialer_test.go:176"
+      ],
+      "notes": "Dialer runtime tests cover async resolver construction, live async lookup, and enable-async-dns6 gating when IPv6 is unavailable or disable-ipv6/prefer-ipv4 is set. Reference-vs-Go conformance coverage has not been added yet."
+    },
+    {
+      "id": "download.dry-run",
+      "area": "Download",
+      "feature": "dry-run probe behavior without writing payload files",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/HttpResponseCommand.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:245",
+        "internal/engine/engine.go:2880",
+        "internal/protocol/http/downloader.go:130"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/engine_test.go:803"
+      ],
+      "notes": "Dry-run is wired for HTTP-style probe paths and engine completion, but it is not yet covered by reference-vs-Go conformance across protocols."
+    },
+    {
+      "id": "ftp.advanced-options",
+      "area": "FTP",
+      "feature": "ftp-type, ftp-reuse-connection, proxy-method, and advanced FTP behavior",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/FtpDownloadCommand.cc",
+        "source-truth/aria2/src/FtpConnection.cc",
+        "source-truth/aria2/src/FtpNegotiationCommand.cc",
+        "source-truth/aria2/src/SftpNegotiationCommand.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:5221",
+        "internal/protocol/ftp/conn.go:391",
+        "internal/protocol/ftp/conn.go:457"
+      ],
+      "conformance_coverage": [
+        "test/conformance/protocol_download_test.go:107",
+        "test/conformance/protocol_download_test.go:132",
+        "test/conformance/protocol_download_test.go:160",
+        "test/conformance/protocol_download_test.go:184",
+        "test/conformance/protocol_download_test.go:214",
+        "test/conformance/protocol_download_test.go:262"
+      ],
+      "unit_coverage": [
+        "internal/protocol/ftp/conn_test.go:568"
+      ],
+      "notes": "ftp-type, passive and active RETR paths, SIZE-unsupported fallback, and percent-decoded paths are covered against aria2c, and proxy GET/tunnel behavior is covered by conformance. ftp-reuse-connection and the broader FTP auth/proxy surface remain partial."
+    },
+    {
+      "id": "sftp.keys-agent",
+      "area": "SFTP",
+      "feature": "SFTP private-key formats, encrypted keys, and SSH agent",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/SSHSession.cc"
+      ],
+      "evidence": [
+        "internal/protocol/sftp/sftp.go:157",
+        "internal/protocol/sftp/sftp.go:190",
+        "internal/protocol/sftp/sftp.go:206",
+        "internal/ssh/keys/parse.go:32",
+        "internal/ssh/agent/agent.go:37"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/engine/ftp_sftp_transfer_test.go:227",
+        "internal/ssh/agent/agent_test.go:14",
+        "internal/ssh/keys/parse_test.go:122",
+        "internal/ssh/keys/parse_test.go:137",
+        "internal/ssh/keys/parse_test.go:155"
+      ],
+      "notes": "SSH agent support and encrypted-key parsing are wired and unit-covered, but this currently extends aria2go beyond the strict SFTP conformance surface. There is still no reference-vs-Go fixture for key-auth or passphrase prompting, so this row remains partial."
+    },
+    {
+      "id": "metalink.single-http-download",
+      "area": "Metalink",
+      "feature": "CLI --metalink-file HTTP-backed download",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/metalink_helper.h",
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/Metalink2RequestGroup.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:270",
+        "cmd/aria2go/main.go:816",
+        "internal/engine/engine.go:3893",
+        "internal/engine/engine.go:3917"
+      ],
+      "conformance_coverage": [
+        "test/conformance/protocol_download_test.go:242"
+      ],
+      "unit_coverage": [
+        "internal/protocol/metalink/metalink_test.go:14"
+      ],
+      "notes": "This claim is limited to the single-file HTTP metalink path; filters, mirrors, and hash behavior are tracked separately."
+    },
+    {
+      "id": "metalink.filters-mirrors",
+      "area": "Metalink",
+      "feature": "Metalink filters, base URI, mirror fallback, server count, and unique protocol",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/metalink_helper.h",
+        "source-truth/aria2/src/MetalinkParserController.cc",
+        "source-truth/aria2/src/Metalinker.cc"
+      ],
+      "evidence": [
+        "internal/protocol/metalink/metalink.go:25",
+        "internal/engine/engine.go:3962",
+        "internal/engine/engine.go:3917"
+      ],
+      "conformance_coverage": [
+        "test/conformance/metalink_options_test.go:64",
+        "test/conformance/metalink_options_test.go:112"
+      ],
+      "unit_coverage": [
+        "internal/protocol/metalink/metalink_test.go:125"
+      ],
+      "notes": "Conformance covers metalink base-URI resolution and mirror fallback to a later URL. Full aria2 filter, server-count, and protocol-selection semantics remain partial."
+    },
+    {
+      "id": "metalink.hash-verification",
+      "area": "Metalink",
+      "feature": "Metalink file and piece hash verification",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/ChecksumCheckIntegrityEntry.cc",
+        "source-truth/aria2/src/metalink_helper.h"
+      ],
+      "evidence": [
+        "internal/protocol/metalink/metalink.go:25",
+        "internal/engine/engine.go:3991"
+      ],
+      "conformance_coverage": [
+        "test/conformance/metalink_options_test.go:158"
+      ],
+      "unit_coverage": [],
+      "notes": "Conformance covers file-hash failure for Metalink downloads. Piece-hash and broader verification surface remain partial."
+    },
+    {
+      "id": "metalink.show-files",
+      "area": "Metalink",
+      "feature": "Metalink --show-files output",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/Context.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:970"
+      ],
+      "conformance_coverage": [
+        "test/conformance/metalink_options_test.go:29"
+      ],
+      "unit_coverage": [
+        "cmd/aria2go/main_test.go:625"
+      ],
+      "notes": "Conformance covers Metalink --show-files output with the same normalized stdout strategy used for torrent show-files."
+    },
+    {
+      "id": "session.basic-save-load",
+      "area": "Session",
+      "feature": "Basic save-session/load-session lifecycle",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/download_helper.h",
+        "source-truth/aria2/src/SessionSerializer.cc",
+        "source-truth/aria2/src/RequestGroupMan.cc"
+      ],
+      "evidence": [
+        "internal/sessionfile/sessionfile.go:1",
+        "internal/engine/engine.go:1507",
+        "internal/engine/engine.go:1562"
+      ],
+      "conformance_coverage": [
+        "test/conformance/session_test.go:11",
+        "test/conformance/session_test.go:72",
+        "test/conformance/config_behavior_matrix_test.go:177"
+      ],
+      "unit_coverage": [
+        "internal/sessionfile/reader_test.go:14",
+        "internal/sessionfile/writer_test.go:14"
+      ],
+      "notes": "Paused save-session reload and completion are conformance-covered. Wider option preservation and shutdown-path fidelity are tracked separately."
+    },
+    {
+      "id": "session.save-option-surface",
+      "area": "Session",
+      "feature": "Complete aria2 option preservation in session files",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/SessionSerializer.cc",
+        "source-truth/aria2/src/RequestGroupMan.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:1511",
+        "internal/engine/engine.go:1562"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/config/session_options_test.go:34",
+        "internal/engine/engine_test.go:2054"
+      ],
+      "notes": "Engine save now preserves explicit request options and metadata URIs, but it still falls well short of aria2's full session option surface."
+    },
+    {
+      "id": "progress.console-readout",
+      "area": "Progress",
+      "feature": "Console progress and result display controls",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/ConsoleStatCalc.cc",
+        "source-truth/aria2/src/MultiUrlRequestInfo.cc"
+      ],
+      "evidence": [
+        "internal/console/console.go:1",
+        "internal/engine/engine.go:1760",
+        "internal/engine/engine.go:1776"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:87",
+        "test/conformance/download_test.go:117",
+        "test/conformance/download_test.go:310"
+      ],
+      "unit_coverage": [
+        "internal/console/console_test.go:142"
+      ],
+      "notes": "Result suppression/routing and the show-console-readout interaction with summary emission are covered. truncate-console-readout and broader console formatting parity remain partial."
+    },
+    {
+      "id": "progress.summary-interval",
+      "area": "Progress",
+      "feature": "--summary-interval timing",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/ConsoleStatCalc.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:1763",
+        "internal/engine/engine.go:1776"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:117"
+      ],
+      "unit_coverage": [
+        "internal/console/console_test.go:397"
+      ],
+      "notes": "Conformance covers the 0-vs-1 second interaction with show-console-readout, and console unit tests cover interval gating across renders. Broader end-to-end timing parity remains partial."
+    },
+    {
+      "id": "cli.help-version",
+      "area": "CLI",
+      "feature": "CLI help and version output",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/Context.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:116",
+        "cmd/aria2go/main.go:404",
+        "cmd/aria2go/main.go:454"
+      ],
+      "conformance_coverage": [
+        "test/conformance/cli_test.go:15",
+        "test/conformance/cli_test.go:55",
+        "test/conformance/cli_test.go:79",
+        "test/conformance/cli_test.go:110",
+        "test/conformance/cli_test.go:132",
+        "test/conformance/cli_test.go:276"
+      ],
+      "unit_coverage": [
+        "cmd/aria2go/main_test.go:140"
+      ],
+      "notes": "Includes --version and -v plus full, basic, short-flag, and tagged help output, with the existing build-dependent help normalizations."
+    },
+    {
+      "id": "cli.config-file-basics",
+      "area": "CLI",
+      "feature": "conf-path, no-conf, config parsing, CLI precedence",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/option_processing.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:143",
+        "cmd/aria2go/main.go:155",
+        "cmd/aria2go/main.go:166",
+        "cmd/aria2go/main.go:181",
+        "cmd/aria2go/main.go:767"
+      ],
+      "conformance_coverage": [
+        "test/conformance/cli_test.go:157",
+        "test/conformance/cli_test.go:178",
+        "test/conformance/cli_test.go:248",
+        "test/conformance/config_test.go:292",
+        "test/conformance/config_test.go:327"
+      ],
+      "unit_coverage": [
+        "internal/config/parse_conf_test.go:1",
+        "internal/config/parse_args_test.go:1"
+      ],
+      "notes": "Covers conf-path success and failure, --no-conf, config parsing, and CLI-over-config/default precedence."
+    },
+    {
+      "id": "cli.stop-timers",
+      "area": "CLI",
+      "feature": "--stop and --stop-with-process",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:586",
+        "internal/config/options.go:213",
+        "cmd/aria2go/main.go:329"
+      ],
+      "conformance_coverage": [
+        "test/conformance/cli_test.go:297",
+        "test/conformance/cli_test.go:321"
+      ],
+      "unit_coverage": [],
+      "notes": "Both stop timers are exercised against blocked transfers and match aria2c's public exit-7/in-progress behavior."
+    },
+    {
+      "id": "engine.lifecycle-options",
+      "area": "Runtime",
+      "feature": "daemon, startup-idle-time, event-poll, and rlimit-nofile lifecycle options",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/option_processing.cc",
+        "source-truth/aria2/src/DownloadEngineFactory.cc",
+        "source-truth/aria2/src/daemon.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:200",
+        "cmd/aria2go/daemon_unix.go:11",
+        "cmd/aria2go/rlimit_unix.go:14",
+        "internal/engine/engine.go:197"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "cmd/aria2go/main_test.go:500",
+        "internal/config/defaults_test.go:148"
+      ],
+      "notes": "rlimit and daemon parse/wiring exist, but daemon behavior, startup-idle-time semantics, and selectable event-poll backend parity are not conformance-proven."
+    },
+    {
+      "id": "lifecycle.shutdown-session-signals",
+      "area": "Runtime",
+      "feature": "Signal shutdown, force escalation, and save-session on exit",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/MultiUrlRequestInfo.cc",
+        "source-truth/aria2/src/DownloadEngine.cc",
+        "source-truth/aria2/src/SessionSerializer.cc"
+      ],
+      "evidence": [
+        "cmd/aria2go/main.go:323",
+        "internal/engine/engine.go:881",
+        "internal/engine/engine.go:1511",
+        "internal/engine/engine.go:2702"
+      ],
+      "conformance_coverage": [
+        "test/conformance/session_test.go:283",
+        "test/conformance/session_test.go:346"
+      ],
+      "unit_coverage": [],
+      "notes": "Signal-driven shutdown now preserves active and waiting session entries on exit. Staged signal escalation and broader shutdown-path parity remain partial."
+    },
+    {
+      "id": "hooks.basic-events",
+      "area": "Hooks",
+      "feature": "on-download-start/complete/error hook argument behavior",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:2860",
+        "internal/engine/engine.go:526"
+      ],
+      "conformance_coverage": [
+        "test/conformance/config_behavior_matrix_test.go:197"
+      ],
+      "unit_coverage": [],
+      "notes": "Covers the hook argument behavior exercised by offline fixtures."
+    },
+    {
+      "id": "hooks.pause-stop-bt-complete",
+      "area": "Hooks",
+      "feature": "on-download-pause, on-download-stop, and on-bt-download-complete hooks",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/prefs.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:4165",
+        "internal/engine/bt_download.go:526",
+        "internal/config/options.go:230"
+      ],
+      "conformance_coverage": [
+        "test/conformance/download_test.go:139",
+        "test/conformance/session_test.go:227",
+        "test/conformance/session_test.go:283"
+      ],
+      "unit_coverage": [],
+      "notes": "Conformance covers pause-hook delivery on an active download, stop-vs-error behavior on signal shutdown, and the BitTorrent completion hook."
+    },
+    {
+      "id": "rpc.notifications",
+      "area": "RPC",
+      "feature": "RPC notification name registry and WebSocket delivery",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:45",
+        "internal/rpc/dispatcher/dispatcher.go:173",
+        "internal/rpc/dispatcher/dispatcher.go:1786",
+        "internal/rpc/transport/websocket.go:575"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_test.go:43",
+        "test/conformance/rpc_deep_matrix_test.go:372"
+      ],
+      "unit_coverage": [
+        "internal/rpc/dispatcher/dispatcher_test.go:147"
+      ],
+      "notes": "Covers advertised notification names plus WebSocket delivery of runtime notifications from the dispatcher bridge."
+    },
+    {
+      "id": "rpc.method-registry",
+      "area": "RPC",
+      "feature": "Advertised RPC method registry",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:67",
+        "internal/rpc/dispatcher/dispatcher.go:1768"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_matrix_test.go:19",
+        "test/conformance/rpc_test.go:14"
+      ],
+      "unit_coverage": [
+        "internal/rpc/dispatcher/dispatcher_test.go:147"
+      ],
+      "notes": "Conformance covers the advertised method set and exact listMethods ordering. Method semantics are tracked by the behavior-specific RPC rows."
+    },
+    {
+      "id": "rpc.add-uri-status-queue",
+      "area": "RPC",
+      "feature": "addUri, tellStatus, tellActive/tellWaiting/tellStopped, queue controls",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:371",
+        "internal/rpc/dispatcher/dispatcher.go:652",
+        "internal/rpc/dispatcher/dispatcher.go:675",
+        "internal/rpc/dispatcher/dispatcher.go:696"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_test.go:70",
+        "test/conformance/rpc_test.go:315",
+        "test/conformance/rpc_matrix_test.go:197",
+        "test/conformance/rpc_matrix_test.go:594"
+      ],
+      "unit_coverage": [
+        "internal/rpc/dispatcher/dispatcher_test.go:293"
+      ],
+      "notes": "Covers core queue and status behavior, including tellWaiting negative offsets and removing a waiting download without creating a stopped result. Full stopped-result fidelity still differs from source truth."
+    },
+    {
+      "id": "rpc.files-uris-servers",
+      "area": "RPC",
+      "feature": "getFiles, getUris, getServers for non-BT/HTTP active downloads",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:756",
+        "internal/rpc/dispatcher/dispatcher.go:787",
+        "internal/rpc/dispatcher/dispatcher.go:856"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_test.go:577",
+        "test/conformance/rpc_test.go:629",
+        "test/conformance/rpc_test.go:866",
+        "test/conformance/rpc_deep_matrix_test.go:348",
+        "test/conformance/rpc_parity_test.go:223"
+      ],
+      "unit_coverage": [],
+      "notes": "Active non-BT HTTP paths are covered, including the missing-GID error shape for getServers. Stopped and multi-file views are still synthesized differently from source-truth request-group/file-entry state."
+    },
+    {
+      "id": "rpc.uploaded-metadata",
+      "area": "RPC",
+      "feature": "addTorrent/addMetalink uploaded metadata validation and save behavior",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:404",
+        "internal/rpc/dispatcher/dispatcher.go:433",
+        "internal/rpc/dispatcher/dispatcher.go:460",
+        "internal/rpc/dispatcher/dispatcher.go:492"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_matrix_test.go:634",
+        "test/conformance/rpc_parity_test.go:14"
+      ],
+      "unit_coverage": [
+        "internal/rpc/dispatcher/dispatcher_test.go:1508"
+      ],
+      "notes": "Conformance covers uploaded torrent and metalink validation, paused enqueue behavior, and rpc-save-upload-metadata session persistence. XML-RPC upload normalization is tracked under rpc.transports rather than claimed here."
+    },
+    {
+      "id": "rpc.add-metalink-multi-gid",
+      "area": "RPC",
+      "feature": "aria2.addMetalink multi-file enqueue and multi-GID return semantics",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:460",
+        "internal/rpc/dispatcher/dispatcher.go:503",
+        "internal/engine/engine.go:1213"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_parity_test.go:84"
+      ],
+      "unit_coverage": [],
+      "notes": "Conformance covers returning one distinct GID per generated Metalink request group while ignoring a caller-supplied gid override."
+    },
+    {
+      "id": "rpc.auth-readonly",
+      "area": "RPC",
+      "feature": "RPC secret auth and read-only method gating",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:186",
+        "internal/rpc/token/token.go:31"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_matrix_test.go:97",
+        "test/conformance/config_test.go:95"
+      ],
+      "unit_coverage": [
+        "internal/rpc/dispatcher/dispatcher_test.go:191",
+        "internal/rpc/jsonrpc/jsonrpc_test.go:468"
+      ],
+      "notes": "Covers token auth and read-only denial behavior."
+    },
+    {
+      "id": "rpc.secure-transport",
+      "area": "RPC",
+      "feature": "RPC TLS transport using rpc-secure, rpc-certificate, and rpc-private-key",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/usage_text.h",
+        "source-truth/aria2/src/OptionHandlerFactory.cc"
+      ],
+      "evidence": [
+        "internal/engine/engine.go:844",
+        "internal/rpc/transport/server.go:123",
+        "internal/config/options.go:179"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_deep_matrix_test.go:449"
+      ],
+      "unit_coverage": [
+        "internal/engine/engine_rpc_test.go:71"
+      ],
+      "notes": "Conformance exercises secure HTTP and secure WebSocket transport with rpc-certificate. The rpc-private-key PEM path is still covered only by engine tests, so this row remains partial."
+    },
+    {
+      "id": "rpc.transports",
+      "area": "RPC",
+      "feature": "JSON-RPC HTTP POST/GET JSONP, XML-RPC, batch, multicall, WebSocket notifications",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/transport/server.go:716",
+        "internal/rpc/transport/server.go:787",
+        "internal/rpc/transport/server.go:813",
+        "internal/rpc/transport/server.go:857",
+        "internal/rpc/transport/websocket.go:313",
+        "internal/rpc/transport/websocket.go:357",
+        "internal/rpc/transport/websocket.go:728"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_deep_matrix_test.go:40",
+        "test/conformance/rpc_deep_matrix_test.go:116",
+        "test/conformance/rpc_deep_matrix_test.go:168",
+        "test/conformance/rpc_deep_matrix_test.go:232",
+        "test/conformance/rpc_deep_matrix_test.go:303",
+        "test/conformance/rpc_deep_matrix_test.go:372",
+        "test/conformance/rpc_deep_matrix_test.go:449",
+        "test/conformance/rpc_deep_matrix_test.go:475",
+        "test/conformance/rpc_test.go:1061"
+      ],
+      "unit_coverage": [
+        "internal/rpc/transport/server_test.go:74"
+      ],
+      "notes": "HTTP POST, GET JSONP, XML-RPC, multicall, WebSocket notifications, fragmented WebSocket messages, and oversized-request abort behavior are conformance-covered. XML-RPC uploaded-metadata normalization exists in the transport layer but is not covered against aria2c, so this row remains partial."
+    },
+    {
+      "id": "rpc.batch-error-shapes",
+      "area": "RPC",
+      "feature": "JSON-RPC and WebSocket batch per-entry error behavior",
+      "status": "implemented",
+      "source_truth": [
+        "source-truth/aria2/src/HttpServerBodyCommand.cc",
+        "source-truth/aria2/src/rpc_helper.cc",
+        "source-truth/aria2/src/WebSocketSession.cc"
+      ],
+      "evidence": [
+        "internal/rpc/jsonrpc/jsonrpc.go:1",
+        "internal/rpc/transport/websocket.go:331"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_deep_matrix_test.go:40",
+        "test/conformance/rpc_deep_matrix_test.go:80",
+        "test/conformance/rpc_deep_matrix_test.go:232",
+        "test/conformance/rpc_deep_matrix_test.go:415"
+      ],
+      "unit_coverage": [
+        "internal/rpc/transport/server_test.go:74"
+      ],
+      "notes": "Conformance covers mixed-validity and invalid-object batch errors over HTTP/JSONP plus the WebSocket missing-id per-entry error shape."
+    },
+    {
+      "id": "rpc.stopped-result-fidelity",
+      "area": "RPC",
+      "feature": "Stopped-result file, URI, bitfield, and status fidelity",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc",
+        "source-truth/aria2/src/RequestGroupMan.cc"
+      ],
+      "evidence": [
+        "internal/engine/stopped_ring.go:1",
+        "internal/engine/engine.go:1155",
+        "internal/rpc/dispatcher/dispatcher.go:718"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_test.go:629"
+      ],
+      "unit_coverage": [],
+      "notes": "Go stores reduced stopped records, so stopped tellStatus/getFiles/getUris responses do not preserve the full source-truth file/result surface."
+    },
+    {
+      "id": "rpc.parameter-validation-edges",
+      "area": "RPC",
+      "feature": "RPC edge-case parameter validation",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc",
+        "source-truth/aria2/src/RpcMethodImpl.h"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:371",
+        "internal/rpc/dispatcher/dispatcher.go:756",
+        "internal/rpc/dispatcher/dispatcher.go:903",
+        "internal/rpc/dispatcher/dispatcher.go:922"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_matrix_test.go:430",
+        "test/conformance/rpc_matrix_test.go:504",
+        "test/conformance/rpc_parity_test.go:239"
+      ],
+      "unit_coverage": [
+        "internal/rpc/dispatcher/dispatcher_test.go:1495"
+      ],
+      "notes": "Conformance covers mixed-type URI filtering on addUri, missing-GID getOption errors, and stopped-download changeOption rejection. Some broader malformed-parameter coercions still differ."
+    },
+    {
+      "id": "rpc.option-validation",
+      "area": "RPC",
+      "feature": "RPC option validation parity",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc",
+        "source-truth/aria2/src/option_processing.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:349",
+        "internal/rpc/dispatcher/dispatcher.go:861",
+        "internal/rpc/dispatcher/dispatcher.go:1186",
+        "internal/config/handlers.go:11"
+      ],
+      "conformance_coverage": [],
+      "unit_coverage": [
+        "internal/rpc/dispatcher/dispatcher_test.go:1495"
+      ],
+      "notes": "RPC maps can bypass normal config validation and silently ignore/coerce invalid values."
+    },
+    {
+      "id": "rpc.change-global-runtime-effects",
+      "area": "RPC",
+      "feature": "changeGlobalOption runtime side effects",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:889",
+        "internal/engine/engine.go:440",
+        "internal/engine/engine.go:1486"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_test.go:710",
+        "test/conformance/rpc_deep_matrix_test.go:300"
+      ],
+      "unit_coverage": [],
+      "notes": "Some values merge into config but already-created runtime state such as throttles is not fully rewired."
+    },
+    {
+      "id": "rpc.get-peers",
+      "area": "RPC",
+      "feature": "aria2.getPeers with active BitTorrent peer details",
+      "status": "partial",
+      "source_truth": [
+        "source-truth/aria2/src/RpcMethodImpl.cc"
+      ],
+      "evidence": [
+        "internal/rpc/dispatcher/dispatcher.go:823",
+        "internal/rpc/dispatcher/dispatcher.go:832"
+      ],
+      "conformance_coverage": [
+        "test/conformance/rpc_test.go:850",
+        "test/conformance/rpc_parity_test.go:207"
+      ],
+      "unit_coverage": [],
+      "notes": "Non-BitTorrent behavior and the missing-GID error shape are covered. Active BitTorrent peer detail is still not implemented."
+    }
+  ]
+}

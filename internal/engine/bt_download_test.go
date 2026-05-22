@@ -1,11 +1,24 @@
 package engine
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha1"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/smartass08/aria2go/internal/bencode"
 	"github.com/smartass08/aria2go/internal/config"
+	"github.com/smartass08/aria2go/internal/core"
 	"github.com/smartass08/aria2go/internal/disk"
 	btpeer "github.com/smartass08/aria2go/internal/protocol/bittorrent/peer"
+	btprogress "github.com/smartass08/aria2go/internal/protocol/bittorrent/progress"
 	"github.com/smartass08/aria2go/internal/torrent"
 )
 
@@ -265,6 +278,14 @@ func TestPeerState_DLRate(t *testing.T) {
 	}
 }
 
+func TestTorrentPercentEncode(t *testing.T) {
+	got := torrentPercentEncode([]byte{'A', 'z', '0', '-', '_', '.', 0x00, 0xff, 'x', 'x'})
+	const want = "Az0%2D%5F%2E%00%FFxx"
+	if got != want {
+		t.Fatalf("torrentPercentEncode() = %q, want %q", got, want)
+	}
+}
+
 func TestBTSwarm_Complete(t *testing.T) {
 	swarm := &btSwarm{numPieces: 4}
 	tmpDir := t.TempDir()
@@ -460,6 +481,48 @@ func TestBTSwarm_HandleMsg_HaveNone(t *testing.T) {
 	}
 }
 
+func TestBTSwarm_SnapshotPeersIncomingPort(t *testing.T) {
+	swarm := &btSwarm{
+		numPieces: 8,
+		peers: []*peerState{
+			{
+				addr:          "127.0.0.1:6881",
+				incoming:      true,
+				peerID:        [20]byte{'A', 'z', '0', '-', '_', '.', 0x00, 0xff, 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'x'},
+				pieces:        8,
+				bitfield:      []byte{0xff},
+				amChoking:     true,
+				peerChoking:   false,
+				lastRateCheck: time.Time{},
+			},
+		},
+	}
+
+	peers := swarm.snapshotPeers()
+	if len(peers) != 1 {
+		t.Fatalf("len(peers) = %d, want 1", len(peers))
+	}
+	peer := peers[0]
+	if peer.PeerID != "Az0%2D%5F%2E%00%FFxxxxxxxxxxxx" {
+		t.Fatalf("PeerID = %q", peer.PeerID)
+	}
+	if peer.IP != "127.0.0.1" {
+		t.Fatalf("IP = %q, want 127.0.0.1", peer.IP)
+	}
+	if peer.Port != "0" {
+		t.Fatalf("Port = %q, want 0 for incoming peer", peer.Port)
+	}
+	if peer.Bitfield != "ff" {
+		t.Fatalf("Bitfield = %q, want ff", peer.Bitfield)
+	}
+	if !peer.AmChoking || peer.PeerChoking {
+		t.Fatalf("choking flags = (%v,%v), want (true,false)", peer.AmChoking, peer.PeerChoking)
+	}
+	if !peer.Seeder {
+		t.Fatal("Seeder = false, want true")
+	}
+}
+
 func TestBTPieceSource(t *testing.T) {
 	tmpDir := t.TempDir()
 	sf, err := disk.NewSingleFile(tmpDir+"/test.bin", 1024, disk.AllocatorNone{})
@@ -507,7 +570,7 @@ func TestBTMSEEncryption(t *testing.T) {
 		{true, false, "plain", "require"},
 		{false, true, "plain", "require"},
 		{true, true, "plain", "require"},
-		{false, false, "arc4", "require"},
+		{false, false, "arc4", "prefer"},
 	}
 	for _, tt := range tests {
 		opts := &config.Options{
@@ -531,8 +594,236 @@ func TestBTMSEEncryption(t *testing.T) {
 	}
 }
 
+func TestBTWebSeedFiles(t *testing.T) {
+	meta := &torrent.MetaInfo{
+		URLList: []string{
+			"http://seed.example.com/base/",
+			"http://seed.example.com/base/",
+			"http://seed-b.example.com/root",
+		},
+	}
+	meta.Info.Name = "single file.bin"
+	meta.Info.Length = 16
+
+	single := btWebSeedFiles(meta, []string{"http://extra.example.com/direct.bin"})
+	if len(single) != 1 {
+		t.Fatalf("single webseed file count = %d, want 1", len(single))
+	}
+	if got, want := single[0].urls[0], "http://extra.example.com/direct.bin"; got != want {
+		t.Fatalf("single direct webseed = %q, want %q", got, want)
+	}
+	if got, want := single[0].urls[1], "http://seed-b.example.com/root"; got != want {
+		t.Fatalf("single base webseed = %q, want %q", got, want)
+	}
+	if got, want := single[0].urls[2], "http://seed.example.com/base/single%20file.bin"; got != want {
+		t.Fatalf("single slash webseed = %q, want %q", got, want)
+	}
+
+	meta.Info.Files = []torrent.FileInfo{
+		{Length: 4, Path: []string{"sub dir", "a.bin"}},
+		{Length: 8, Path: []string{"b.bin"}},
+	}
+	multi := btWebSeedFiles(meta, nil)
+	if len(multi) != 2 {
+		t.Fatalf("multi webseed file count = %d, want 2", len(multi))
+	}
+	if got, want := multi[0].urls[0], "http://seed-b.example.com/root/sub%20dir/a.bin"; got != want {
+		t.Fatalf("multi no-slash webseed = %q, want %q", got, want)
+	}
+	if got, want := multi[0].urls[1], "http://seed.example.com/base/sub%20dir/a.bin"; got != want {
+		t.Fatalf("multi slash webseed = %q, want %q", got, want)
+	}
+	if multi[1].offset != 4 {
+		t.Fatalf("second file offset = %d, want 4", multi[1].offset)
+	}
+}
+
+func TestBTSeedPolicy(t *testing.T) {
+	rg := &requestGroup{
+		opts: &config.Options{
+			SeedRatio: "1.0",
+			SeedTime:  "0",
+		},
+		controlInfo: &btprogress.Info{
+			UploadLength: 0,
+		},
+	}
+	policy := newBTSeedPolicy(rg, 1024)
+	if !policy.shouldStop(rg) {
+		t.Fatal("seed-time=0 should stop seeding immediately")
+	}
+
+	rg.opts.SeedTime = ""
+	policy = newBTSeedPolicy(rg, 1024)
+	if policy.shouldStop(rg) {
+		t.Fatal("share-ratio criterion should not stop before any upload")
+	}
+	rg.controlInfo.UploadLength = 1024
+	if !policy.shouldStop(rg) {
+		t.Fatal("share-ratio criterion should stop once upload reaches completed length")
+	}
+
+	rg.opts.SeedRatio = "0"
+	policy = newBTSeedPolicy(rg, 1024)
+	if policy.shouldStop(rg) {
+		t.Fatal("seed-ratio=0 without seed-time should seed indefinitely")
+	}
+}
+
+func TestRemoveBTUnselectedFiles(t *testing.T) {
+	dir := t.TempDir()
+	keepPath := filepath.Join(dir, "bt", "keep.bin")
+	dropPath := filepath.Join(dir, "bt", "drop.bin")
+	if err := os.MkdirAll(filepath.Dir(keepPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(keepPath, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write keep: %v", err)
+	}
+	if err := os.WriteFile(dropPath, []byte("drop"), 0o644); err != nil {
+		t.Fatalf("write drop: %v", err)
+	}
+
+	e, err := New(testOpts(), testLogger(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rg := &requestGroup{
+		opts: &config.Options{
+			Dir:                    dir,
+			BTRemoveUnselectedFile: true,
+		},
+		btUnselected: []string{"bt/drop.bin"},
+	}
+	if err := e.removeBTUnselectedFiles(rg); err != nil {
+		t.Fatalf("removeBTUnselectedFiles: %v", err)
+	}
+	if _, err := os.Stat(dropPath); !os.IsNotExist(err) {
+		t.Fatalf("drop file stat = %v, want not exist", err)
+	}
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Fatalf("keep file stat = %v, want present", err)
+	}
+}
+
+func TestRunBTDownloadUsesPositionalWebSeed(t *testing.T) {
+	payload := bytes.Repeat([]byte("webseed-payload-"), 2048)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/webseed.bin" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		if start, end, ok := testWebSeedRangeBounds(r.Header.Get("Range"), len(payload)); ok {
+			w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+			w.Header().Set("Content-Range", "bytes "+strconv.Itoa(start)+"-"+strconv.Itoa(end)+"/"+strconv.Itoa(len(payload)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(payload[start : end+1])
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	torrentData := testWebSeedTorrent(t, "webseed.bin", payload, 16*1024, nil)
+	opts := testOpts()
+	opts.Dir = t.TempDir()
+	opts.SeedTime = "0"
+
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rg := &requestGroup{
+		gid:  1,
+		opts: opts,
+		uris: []string{server.URL + "/webseed.bin"},
+	}
+	if err := e.runBTDownload(context.Background(), rg, torrentData); err != nil {
+		t.Fatalf("runBTDownload: %v", err)
+	}
+	if rg.errCode != core.ExitSuccess {
+		t.Fatalf("errCode = %d, errMsg = %q", rg.errCode, rg.errMsg)
+	}
+
+	got, err := os.ReadFile(filepath.Join(opts.Dir, "webseed.bin"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("output mismatch: got %d bytes want %d", len(got), len(payload))
+	}
+}
+
 func TestVerification(t *testing.T) {
 	testVerifyHelper(t, 4)
+}
+
+func testWebSeedTorrent(t *testing.T, name string, payload []byte, pieceLength int64, urlList []string) []byte {
+	t.Helper()
+
+	var pieces []byte
+	for off := 0; off < len(payload); off += int(pieceLength) {
+		end := off + int(pieceLength)
+		if end > len(payload) {
+			end = len(payload)
+		}
+		sum := sha1.Sum(payload[off:end])
+		pieces = append(pieces, sum[:]...)
+	}
+
+	info := testBencodeDict(
+		"name", bencode.StringVal{S: name},
+		"piece length", bencode.IntVal{I: pieceLength},
+		"pieces", bencode.StringVal{S: string(pieces)},
+		"length", bencode.IntVal{I: int64(len(payload))},
+	)
+	top := testBencodeDict(
+		"announce", bencode.StringVal{S: "http://127.0.0.1:9/announce"},
+		"info", info,
+	)
+	if len(urlList) == 1 {
+		top.Set("url-list", bencode.StringVal{S: urlList[0]})
+	} else if len(urlList) > 1 {
+		values := make([]bencode.Value, 0, len(urlList))
+		for _, raw := range urlList {
+			values = append(values, bencode.StringVal{S: raw})
+		}
+		top.Set("url-list", bencode.ListVal{L: values})
+	}
+	raw, err := bencode.Marshal(top)
+	if err != nil {
+		t.Fatalf("marshal torrent: %v", err)
+	}
+	return raw
+}
+
+func testWebSeedRangeBounds(raw string, size int) (start int, end int, ok bool) {
+	if !strings.HasPrefix(raw, "bytes=") || size <= 0 {
+		return 0, 0, false
+	}
+	spec := strings.TrimPrefix(raw, "bytes=")
+	startText, endText, hasDash := strings.Cut(spec, "-")
+	if !hasDash || startText == "" {
+		return 0, 0, false
+	}
+	start, err := strconv.Atoi(startText)
+	if err != nil || start < 0 || start >= size {
+		return 0, 0, false
+	}
+	if endText == "" {
+		return start, size - 1, true
+	}
+	end, err = strconv.Atoi(endText)
+	if err != nil || end < start {
+		return 0, 0, false
+	}
+	if end >= size {
+		end = size - 1
+	}
+	return start, end, true
 }
 
 func testVerifyHelper(t *testing.T, numPieces int) {

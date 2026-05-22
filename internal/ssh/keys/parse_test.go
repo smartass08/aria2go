@@ -10,7 +10,10 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"testing"
+
+	xssh "golang.org/x/crypto/ssh"
 )
 
 func generateRSAPEM(t *testing.T) []byte {
@@ -98,39 +101,54 @@ func TestParseECPrivateKey(t *testing.T) {
 	}
 }
 
-func TestParseOpenSSHKeyNotSupported(t *testing.T) {
-	pemData := pem.EncodeToMemory(&pem.Block{
-		Type:  "OPENSSH PRIVATE KEY",
-		Bytes: []byte("dummy-data"),
-	})
-	_, err := ParsePrivateKey(pemData)
-	if err == nil {
-		t.Error("expected error for OpenSSH key format")
+func TestParseOpenSSHKey(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa generate: %v", err)
 	}
-	if !errorsIs(err, ErrUnsupported) {
-		t.Errorf("expected ErrUnsupported, got %v", err)
+	block, err := xssh.MarshalPrivateKey(key, "test@example.com")
+	if err != nil {
+		t.Fatalf("MarshalPrivateKey: %v", err)
+	}
+	parsed, err := ParsePrivateKey(pem.EncodeToMemory(block))
+	if err != nil {
+		t.Fatalf("ParsePrivateKey OpenSSH: %v", err)
+	}
+	if _, ok := parsed.(*rsa.PrivateKey); !ok {
+		t.Fatalf("expected *rsa.PrivateKey, got %T", parsed)
 	}
 }
 
 func TestParseEncryptedKeyNoPassphrase(t *testing.T) {
-	pemData := pem.EncodeToMemory(&pem.Block{
-		Type:  "ENCRYPTED PRIVATE KEY",
-		Bytes: []byte("dummy-data"),
-	})
-	_, err := ParsePrivateKey(pemData)
-	if err == nil {
-		t.Error("expected error for encrypted key without passphrase")
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa generate: %v", err)
+	}
+	block, err := xssh.MarshalPrivateKeyWithPassphrase(key, "test@example.com", []byte("password"))
+	if err != nil {
+		t.Fatalf("MarshalPrivateKeyWithPassphrase: %v", err)
+	}
+	_, err = ParsePrivateKey(pem.EncodeToMemory(block))
+	if !errors.Is(err, ErrPassphraseRequired) {
+		t.Fatalf("ParsePrivateKey() error = %v, want ErrPassphraseRequired", err)
 	}
 }
 
 func TestParseEncryptedKeyWithPassphrase(t *testing.T) {
-	pemData := pem.EncodeToMemory(&pem.Block{
-		Type:  "ENCRYPTED PRIVATE KEY",
-		Bytes: []byte("dummy-data"),
-	})
-	_, err := ParsePrivateKeyWithPassphrase(pemData, []byte("password"))
-	if err == nil {
-		t.Error("expected not-yet-implemented error for encrypted key decryption")
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa generate: %v", err)
+	}
+	block, err := xssh.MarshalPrivateKeyWithPassphrase(key, "test@example.com", []byte("password"))
+	if err != nil {
+		t.Fatalf("MarshalPrivateKeyWithPassphrase: %v", err)
+	}
+	parsed, err := ParsePrivateKeyWithPassphrase(pem.EncodeToMemory(block), []byte("password"))
+	if err != nil {
+		t.Fatalf("ParsePrivateKeyWithPassphrase() error = %v", err)
+	}
+	if _, ok := parsed.(*rsa.PrivateKey); !ok {
+		t.Fatalf("expected *rsa.PrivateKey, got %T", parsed)
 	}
 }
 
@@ -309,18 +327,5 @@ func TestRoundTripPKCS8ECDSASign(t *testing.T) {
 	}
 	if !ecdsa.VerifyASN1(&orig.PublicKey, hash[:], sig) {
 		t.Fatal("PKCS8 round-trip signature verification failed")
-	}
-}
-
-func errorsIs(err, target error) bool {
-	for {
-		if err == target {
-			return true
-		}
-		unwrapped, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = unwrapped.Unwrap()
 	}
 }

@@ -10,10 +10,10 @@ import (
 	"io"
 	"net"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/smartass08/aria2go/internal/core"
@@ -22,17 +22,23 @@ import (
 
 // Opt configures FTP connection options.
 type Opt struct {
-	User      string
-	Pass      string
-	TLSMode   int // 0=none, 1=explicit (AUTH TLS), 2=implicit (connect TLS)
-	TLSConfig *tls.Config
-	Passive   bool
+	User            string
+	Pass            string
+	Type            string
+	TLSMode         int // 0=none, 1=explicit (AUTH TLS), 2=implicit (connect TLS)
+	TLSConfig       *tls.Config
+	Passive         bool
+	ReuseConnection bool
 }
 
 // maxRecvBuffer limits total FTP response bytes to prevent memory exhaustion.
 const maxRecvBuffer = 64 << 10
 
-var errMaxRecvBuffer = errors.New("ftp: max FTP recv buffer reached")
+var (
+	errMaxRecvBuffer = errors.New("ftp: max FTP recv buffer reached")
+	// ErrSizeUnsupported indicates the server did not return a usable SIZE response.
+	ErrSizeUnsupported = errors.New("ftp: SIZE unsupported")
+)
 
 // recvLimited wraps a net.Conn with a read limit.
 type recvLimited struct {
@@ -54,14 +60,21 @@ func (r *recvLimited) Read(p []byte) (int, error) {
 
 // Conn is an FTP control connection.
 type Conn struct {
-	conn           net.Conn
-	text           *textproto.Conn
-	baseWorkingDir string
-	passive        bool
+	conn            net.Conn
+	text            *textproto.Conn
+	baseWorkingDir  string
+	passive         bool
+	dialer          *netx.Dialer
+	reuseConnection bool
+	reuseKey        connReuseKey
+	closed          bool
+	broken          bool
+	stateMu         sync.Mutex
 }
 
 // Pre-built FTP command byte slices for no-argument commands.
 var (
+	cmdTYPEA = []byte("TYPE A\r\n")
 	cmdTYPEI = []byte("TYPE I\r\n")
 	cmdPWD   = []byte("PWD\r\n")
 	cmdEPSV  = []byte("EPSV\r\n")
@@ -79,25 +92,24 @@ var pasvBufPool = sync.Pool{
 	New: func() any { return make([]int, 6) },
 }
 
-// dataDialer is a reusable dialer for data connections with socket options pre-configured.
-var dataDialer = &net.Dialer{
-	Control: func(network, addr string, c syscall.RawConn) error {
-		var setErr error
-		ctrlErr := c.Control(func(fd uintptr) {
-			if err := setSockOptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
-				setErr = err
-				return
-			}
-			if network == "tcp" || network == "tcp4" || network == "tcp6" {
-				setErr = setSockOptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-			}
-		})
-		if ctrlErr != nil {
-			return ctrlErr
-		}
-		return setErr
-	},
+const maxPooledControlConnsPerKey = 4
+
+type connReuseKey struct {
+	addr      string
+	user      string
+	pass      string
+	ftpType   string
+	tlsMode   int
+	passive   bool
+	dialerKey string
 }
+
+type controlConnPool struct {
+	mu      sync.Mutex
+	entries map[connReuseKey][]*Conn
+}
+
+var ftpControlConnPool = controlConnPool{entries: make(map[connReuseKey][]*Conn)}
 
 // getCmdBuf returns a pooled byte buffer, cleared for use.
 func getCmdBuf() *[]byte {
@@ -113,6 +125,18 @@ func putCmdBuf(buf *[]byte) {
 
 // Dial connects to an FTP server, reads the banner, and performs login.
 func Dial(ctx context.Context, dialer *netx.Dialer, addr string, opt Opt) (*Conn, error) {
+	key := reuseControlConnKey(addr, dialer, opt)
+	if opt.ReuseConnection {
+		if pooled := ftpControlConnPool.pop(key); pooled != nil {
+			pooled.prepareForReuse(dialer, key, opt)
+			if err := pooled.validateReuse(); err == nil {
+				return pooled, nil
+			}
+			pooled.markBroken()
+			_ = pooled.closeUnderlying()
+		}
+	}
+
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, ftpError("dial", err)
@@ -133,9 +157,12 @@ func Dial(ctx context.Context, dialer *netx.Dialer, addr string, opt Opt) (*Conn
 
 	rc := &recvLimited{Conn: conn}
 	c := &Conn{
-		conn:    conn,
-		text:    textproto.NewConn(rc),
-		passive: opt.Passive,
+		conn:            conn,
+		text:            textproto.NewConn(rc),
+		passive:         opt.Passive,
+		dialer:          dialer,
+		reuseConnection: opt.ReuseConnection,
+		reuseKey:        key,
 	}
 
 	code, _, err := c.text.ReadResponse(220)
@@ -157,7 +184,7 @@ func Dial(ctx context.Context, dialer *netx.Dialer, addr string, opt Opt) (*Conn
 		return nil, err
 	}
 
-	if _, _, err := c.cmdBytes(200, cmdTYPEI); err != nil {
+	if _, _, err := c.cmdBytes(200, typeCommand(opt.Type)); err != nil {
 		c.conn.Close()
 		return nil, err
 	}
@@ -256,14 +283,23 @@ func (c *Conn) cmdBytes(expected int, cmd []byte) (int, string, error) {
 
 // sendAndRead writes a command to the control connection and reads the response.
 func (c *Conn) sendAndRead(expected int, cmd []byte) (int, string, error) {
+	if c.isClosed() {
+		return 0, "", errors.New("ftp: connection closed")
+	}
 	if _, err := c.text.W.Write(cmd); err != nil {
+		c.markBroken()
 		return 0, "", ftpError("write", err)
 	}
 	if err := c.text.W.Flush(); err != nil {
+		c.markBroken()
 		return 0, "", ftpError("flush", err)
 	}
 	code, msg, err := c.text.ReadResponse(expected)
 	if err != nil {
+		var protoErr *textproto.Error
+		if !errors.As(err, &protoErr) {
+			c.markBroken()
+		}
 		return code, msg, ftpError("ftp", err)
 	}
 	return code, msg, nil
@@ -286,11 +322,14 @@ func (c *Conn) Cmd(expected int, format string, args ...interface{}) (int, strin
 
 // Size returns the size of a file on the FTP server using the SIZE command.
 func (c *Conn) Size(ctx context.Context, path string) (int64, error) {
-	_, msg, err := c.cmdBytesString(213, "SIZE ", path)
+	code, msg, err := c.cmdBytesString(0, "SIZE ", decodePath(path))
 	if err != nil {
 		return 0, err
 	}
 	_ = ctx
+	if code != 213 {
+		return 0, ErrSizeUnsupported
+	}
 	size, err := strconv.ParseInt(strings.TrimSpace(msg), 10, 64)
 	if err != nil {
 		return 0, ftpError("SIZE parse", err)
@@ -326,7 +365,7 @@ func (c *Conn) BaseWorkingDir() string {
 
 // Mdtm sends MDTM and parses the file modification time.
 func (c *Conn) Mdtm(ctx context.Context, path string) (time.Time, error) {
-	_, msg, err := c.cmdBytesString(213, "MDTM ", path)
+	_, msg, err := c.cmdBytesString(213, "MDTM ", decodePath(path))
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -344,7 +383,7 @@ func (c *Conn) Mdtm(ctx context.Context, path string) (time.Time, error) {
 
 // Cwd sends CWD to change the remote working directory.
 func (c *Conn) Cwd(ctx context.Context, dir string) error {
-	_, _, err := c.cmdBytesString(250, "CWD ", dir)
+	_, _, err := c.cmdBytesString(250, "CWD ", decodePath(dir))
 	_ = ctx
 	return err
 }
@@ -352,12 +391,13 @@ func (c *Conn) Cwd(ctx context.Context, dir string) error {
 // Retrieve initiates a RETR download and returns the data connection.
 func (c *Conn) Retrieve(ctx context.Context, path string, offset int64) (io.ReadCloser, error) {
 	var dataConn net.Conn
+	var activeLn *net.TCPListener
 	var err error
 
 	if c.optPassive() {
 		dataConn, err = c.dialPassive(ctx)
 	} else {
-		return nil, errors.New("ftp: active mode not implemented")
+		activeLn, err = c.prepareActive(ctx)
 	}
 	if err != nil {
 		return nil, err
@@ -365,24 +405,50 @@ func (c *Conn) Retrieve(ctx context.Context, path string, offset int64) (io.Read
 
 	code, _, err := c.cmdBytesInt(0, "REST ", offset)
 	if err != nil {
-		dataConn.Close()
+		if dataConn != nil {
+			dataConn.Close()
+		}
+		if activeLn != nil {
+			activeLn.Close()
+		}
 		return nil, err
 	}
 	if code != 350 {
 		if offset != 0 {
-			dataConn.Close()
+			if dataConn != nil {
+				dataConn.Close()
+			}
+			if activeLn != nil {
+				activeLn.Close()
+			}
 			return nil, ftpError("REST", fmt.Errorf("server rejected REST: code %d", code))
 		}
 	}
 
-	code, _, err = c.cmdBytesString(0, "RETR ", path)
+	code, _, err = c.cmdBytesString(0, "RETR ", decodePath(path))
 	if err != nil {
-		dataConn.Close()
+		if dataConn != nil {
+			dataConn.Close()
+		}
+		if activeLn != nil {
+			activeLn.Close()
+		}
 		return nil, err
 	}
 	if code != 150 && code != 125 {
-		dataConn.Close()
+		if dataConn != nil {
+			dataConn.Close()
+		}
+		if activeLn != nil {
+			activeLn.Close()
+		}
 		return nil, ftpError("RETR", fmt.Errorf("unexpected code %d", code))
+	}
+	if activeLn != nil {
+		dataConn, err = c.acceptActive(ctx, activeLn)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &dataReader{Conn: dataConn, ctrl: c}, nil
@@ -393,20 +459,32 @@ func (c *Conn) optPassive() bool {
 }
 
 func (c *Conn) dialPassive(ctx context.Context) (net.Conn, error) {
-	_, msg, err := c.cmdBytes(229, cmdEPSV)
-	if err != nil {
-		msg = ""
-		_, msg, err = c.cmdBytes(227, cmdPASV)
+	if c.controlUsesIPv6() {
+		_, msg, err := c.cmdBytes(229, cmdEPSV)
 		if err != nil {
-			return nil, err
+			msg = ""
+			_, msg, err = c.cmdBytes(227, cmdPASV)
+			if err != nil {
+				return nil, err
+			}
+			_, port, perr := parsePASV(msg)
+			if perr != nil {
+				return nil, perr
+			}
+			return c.dialData(ctx, c.remoteHost(), port)
 		}
-		_, port, perr := parsePASV(msg)
+		port, perr := parseEPSV(msg)
 		if perr != nil {
 			return nil, perr
 		}
 		return c.dialData(ctx, c.remoteHost(), port)
 	}
-	port, perr := parseEPSV(msg)
+
+	_, msg, err := c.cmdBytes(227, cmdPASV)
+	if err != nil {
+		return nil, err
+	}
+	_, port, perr := parsePASV(msg)
 	if perr != nil {
 		return nil, perr
 	}
@@ -415,9 +493,59 @@ func (c *Conn) dialPassive(ctx context.Context) (net.Conn, error) {
 
 func (c *Conn) dialData(ctx context.Context, host string, port int) (net.Conn, error) {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	conn, err := dataDialer.DialContext(ctx, "tcp", addr)
+	if c.dialer == nil {
+		return nil, ftpError("data dial", errors.New("ftp: missing dialer"))
+	}
+	conn, err := c.dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, ftpError("data dial", err)
+	}
+	return conn, nil
+}
+
+func (c *Conn) prepareActive(ctx context.Context) (*net.TCPListener, error) {
+	local, ok := c.conn.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		return nil, errors.New("ftp: active mode requires TCP control connection")
+	}
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{
+		IP:   append(net.IP(nil), local.IP...),
+		Port: 0,
+		Zone: local.Zone,
+	})
+	if err != nil {
+		return nil, ftpError("active listen", err)
+	}
+	addr := ln.Addr().(*net.TCPAddr)
+	if ip4 := addr.IP.To4(); ip4 != nil {
+		if _, _, err := c.Cmd(200, "PORT %d,%d,%d,%d,%d,%d", ip4[0], ip4[1], ip4[2], ip4[3], addr.Port/256, addr.Port%256); err != nil {
+			ln.Close()
+			return nil, err
+		}
+		return ln, nil
+	}
+
+	host := addr.IP.String()
+	if host == "" {
+		host = strings.Trim(local.IP.String(), "[]")
+	}
+	if _, _, err := c.Cmd(200, "EPRT |2|%s|%d|", host, addr.Port); err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return ln, nil
+}
+
+func (c *Conn) acceptActive(ctx context.Context, ln *net.TCPListener) (net.Conn, error) {
+	defer ln.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := ln.SetDeadline(deadline); err != nil {
+			return nil, ftpError("active accept", err)
+		}
+	}
+	conn, err := ln.AcceptTCP()
+	if err != nil {
+		return nil, ftpError("active accept", err)
 	}
 	return conn, nil
 }
@@ -427,9 +555,49 @@ func (c *Conn) remoteHost() string {
 	return host
 }
 
+func (c *Conn) controlUsesIPv6() bool {
+	if tcpAddr, ok := c.conn.RemoteAddr().(*net.TCPAddr); ok {
+		return tcpAddr.IP != nil && tcpAddr.IP.To4() == nil
+	}
+	host := strings.Trim(c.remoteHost(), "[]")
+	if i := strings.LastIndex(host, "%"); i != -1 {
+		host = host[:i]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
+}
+
+func typeCommand(ftpType string) []byte {
+	if strings.EqualFold(strings.TrimSpace(ftpType), "ascii") {
+		return cmdTYPEA
+	}
+	return cmdTYPEI
+}
+
+func decodePath(path string) string {
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return path
+	}
+	return decoded
+}
+
 // Close closes the FTP control connection.
 func (c *Conn) Close() error {
-	return c.conn.Close()
+	c.stateMu.Lock()
+	if c.closed {
+		c.stateMu.Unlock()
+		return nil
+	}
+	c.closed = true
+	key := c.reuseKey
+	reuse := c.reuseConnection && !c.broken
+	c.stateMu.Unlock()
+
+	if reuse && ftpControlConnPool.push(key, c) {
+		return nil
+	}
+	return c.closeUnderlying()
 }
 
 type dataReader struct {
@@ -441,12 +609,14 @@ func (r *dataReader) Close() error {
 	dataErr := r.Conn.Close()
 	code, _, ctrlErr := r.ctrl.text.ReadResponse(226)
 	if ctrlErr != nil {
+		r.ctrl.markBroken()
 		if dataErr != nil {
 			return errors.Join(dataErr, ftpError("transfer complete", ctrlErr))
 		}
 		return ftpError("transfer complete", ctrlErr)
 	}
 	if code != 226 {
+		r.ctrl.markBroken()
 		err := ftpError("transfer complete", fmt.Errorf("unexpected code %d", code))
 		if dataErr != nil {
 			return errors.Join(dataErr, err)
@@ -552,4 +722,85 @@ func cloneTLSConfig(cfg *tls.Config, addr string) *tls.Config {
 
 func ftpError(op string, err error) error {
 	return core.WrapError(core.ExitFTPProtocolError, op, err)
+}
+
+func reuseControlConnKey(addr string, dialer *netx.Dialer, opt Opt) connReuseKey {
+	dialerKey := ""
+	if dialer != nil {
+		dialerKey = dialer.ReuseKey()
+	}
+	return connReuseKey{
+		addr:      addr,
+		user:      opt.User,
+		pass:      opt.Pass,
+		ftpType:   strings.ToLower(strings.TrimSpace(opt.Type)),
+		tlsMode:   opt.TLSMode,
+		passive:   opt.Passive,
+		dialerKey: dialerKey,
+	}
+}
+
+func (p *controlConnPool) pop(key connReuseKey) *Conn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	stack := p.entries[key]
+	if len(stack) == 0 {
+		return nil
+	}
+	conn := stack[len(stack)-1]
+	stack = stack[:len(stack)-1]
+	if len(stack) == 0 {
+		delete(p.entries, key)
+	} else {
+		p.entries[key] = stack
+	}
+	return conn
+}
+
+func (p *controlConnPool) push(key connReuseKey, conn *Conn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	stack := p.entries[key]
+	if len(stack) >= maxPooledControlConnsPerKey {
+		return false
+	}
+	p.entries[key] = append(stack, conn)
+	return true
+}
+
+func (c *Conn) prepareForReuse(dialer *netx.Dialer, key connReuseKey, opt Opt) {
+	c.stateMu.Lock()
+	c.dialer = dialer
+	c.reuseKey = key
+	c.reuseConnection = opt.ReuseConnection
+	c.passive = opt.Passive
+	c.closed = false
+	c.broken = false
+	c.stateMu.Unlock()
+}
+
+func (c *Conn) validateReuse() error {
+	_, _, err := c.cmdBytes(200, []byte("NOOP\r\n"))
+	return err
+}
+
+func (c *Conn) markBroken() {
+	c.stateMu.Lock()
+	c.broken = true
+	c.stateMu.Unlock()
+}
+
+func (c *Conn) isClosed() bool {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.closed
+}
+
+func (c *Conn) closeUnderlying() error {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
 }

@@ -29,23 +29,28 @@ import (
 
 // Console is an aria2-style terminal output handle.
 type Console struct {
-	out        io.Writer
-	opts       Options
-	sigCh      chan os.Signal
-	mu         sync.Mutex
-	lastUpdate time.Time
-	fileAlloc  *AllocProgress
-	checksum   *CheckProgress
+	out         io.Writer
+	opts        Options
+	sigCh       chan os.Signal
+	mu          sync.Mutex
+	lastUpdate  time.Time
+	lastSummary time.Time
+	fileAlloc   *AllocProgress
+	checksum    *CheckProgress
 }
 
 // Options configures a Console.
 type Options struct {
-	NoColor       bool
-	Quiet         bool
-	Summary       bool
-	Interactive   bool
-	Stderr        bool
-	DownloadsDone bool // true when all downloads finished — compact mode omits DL/UL header
+	NoColor         bool
+	Quiet           bool
+	SummaryInterval time.Duration
+	Interactive     bool
+	Stderr          bool
+	DownloadsDone   bool // true when all downloads finished — compact mode omits DL/UL header
+	ShowReadout     bool
+	ShowReadoutSet  bool
+	Truncate        bool
+	TruncateSet     bool
 }
 
 // AllocProgress holds file allocation progress for inline display.
@@ -261,13 +266,18 @@ func (c *Console) Render(snapshots []DownloadStat) {
 
 	// 1Hz update throttling, matching aria2 ConsoleStatCalc::calculateStat.
 	c.mu.Lock()
-	if elapsed := time.Since(c.lastUpdate); elapsed < 1000*time.Millisecond {
+	now := time.Now()
+	if elapsed := now.Sub(c.lastUpdate); elapsed < 1000*time.Millisecond {
 		c.mu.Unlock()
 		return
 	}
-	c.lastUpdate = time.Now()
+	c.lastUpdate = now
 	alloc := c.fileAlloc
 	check := c.checksum
+	summaryDue := c.opts.SummaryInterval > 0 && (c.lastSummary.IsZero() || now.Sub(c.lastSummary) >= c.opts.SummaryInterval)
+	if summaryDue {
+		c.lastSummary = now
+	}
 	c.mu.Unlock()
 
 	tty := c.isatty()
@@ -281,8 +291,10 @@ func (c *Console) Render(snapshots []DownloadStat) {
 		fmt.Fprintf(c.out, "\r%s\r", strings.Repeat(" ", cols))
 	}
 
-	if c.opts.Summary {
+	if summaryDue {
 		c.renderSummary(snapshots, cols)
+	}
+	if !c.showReadout() {
 		return
 	}
 
@@ -299,13 +311,16 @@ func (c *Console) Render(snapshots []DownloadStat) {
 	c.appendCheckProgress(buf, check)
 
 	if tty {
-		// TTY: use colors if enabled, no trailing newline (overwrite mode).
-		// The line was already cleared above.
+		var out string
 		if c.opts.NoColor {
-			c.writeStripped(c.out, buf)
+			out = stripColors(buf.String())
 		} else {
-			buf.WriteTo(c.out)
+			out = buf.String()
 		}
+		if c.truncateReadout() {
+			out = truncateANSI(out, cols)
+		}
+		io.WriteString(c.out, out)
 	} else {
 		// Non-TTY: never use colors, one line per update with trailing newline.
 		// Matching aria2's ColorizedStream::str(false) on non-TTY.
@@ -468,7 +483,7 @@ func (c *Console) writeSizeProgress(buf *bytes.Buffer, s *DownloadStat) {
 func (c *Console) renderSummary(snapshots []DownloadStat, cols int) {
 	sepEq := strings.Repeat("=", cols)
 	now := time.Now()
-	dateStr := now.Format("Mon Jan 2 15:04:05 2006")
+	dateStr := now.Format("Mon Jan _2 15:04:05 2006")
 	fmt.Fprintf(c.out, " *** Download Progress Summary as of %s *** \n%s\n", dateStr, sepEq)
 
 	sepDash := strings.Repeat("-", cols)
@@ -484,6 +499,7 @@ func (c *Console) renderSummary(snapshots []DownloadStat, cols int) {
 		fmt.Fprint(c.out, "\n")
 		fmt.Fprintln(c.out, sepDash)
 	}
+	fmt.Fprintln(c.out)
 }
 
 func (c *Console) appendAllocProgress(buf *bytes.Buffer, p *AllocProgress) {
@@ -536,6 +552,20 @@ func (c *Console) appendCheckProgress(buf *bytes.Buffer, p *CheckProgress) {
 		buf.Write(strconv.AppendInt(scratch[:0], int64(p.Queued), 10))
 		buf.WriteByte(')')
 	}
+}
+
+func (c *Console) showReadout() bool {
+	if !c.opts.ShowReadoutSet {
+		return true
+	}
+	return c.opts.ShowReadout
+}
+
+func (c *Console) truncateReadout() bool {
+	if !c.opts.TruncateSet {
+		return true
+	}
+	return c.opts.Truncate
 }
 
 // Signals registers SIGINT, SIGTERM, SIGHUP (Unix) or equivalent
@@ -725,6 +755,44 @@ func stripColors(s string) string {
 		buf.WriteByte(s[i])
 	}
 	return buf.String()
+}
+
+func truncateANSI(s string, cols int) string {
+	if cols <= 0 || len(s) == 0 {
+		return ""
+	}
+
+	var buf strings.Builder
+	buf.Grow(len(s))
+
+	visible := 0
+	hasANSI := false
+	for i := 0; i < len(s); {
+		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && s[j] != 'm' {
+				j++
+			}
+			if j < len(s) {
+				hasANSI = true
+				buf.WriteString(s[i : j+1])
+				i = j + 1
+				continue
+			}
+		}
+		if visible >= cols {
+			break
+		}
+		buf.WriteByte(s[i])
+		visible++
+		i++
+	}
+
+	out := buf.String()
+	if hasANSI && !strings.HasSuffix(out, clrClear) {
+		out += clrClear
+	}
+	return out
 }
 
 // isatty returns true if the output writer is a terminal.

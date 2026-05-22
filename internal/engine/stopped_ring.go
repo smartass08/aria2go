@@ -167,6 +167,46 @@ func (r *stoppedRing) evictionInfo() (total, errors int, lastErr core.ErrorCode)
 	return r.evictedTotal, r.evictedErrors, r.evictedLastErr
 }
 
+func (r *stoppedRing) resize(capacity int) {
+	if capacity <= 0 {
+		capacity = 1000
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if capacity == len(r.buf) {
+		return
+	}
+
+	if r.size > capacity {
+		drop := r.size - capacity
+		for i := 0; i < drop; i++ {
+			pos := (r.head + i) % len(r.buf)
+			evicted := r.buf[pos]
+			delete(r.index, evicted.gid)
+			r.evictedTotal++
+			if evicted.belongsTo == 0 && evicted.errCode != core.ExitSuccess {
+				r.evictedErrors++
+				r.evictedLastErr = evicted.errCode
+			}
+		}
+		r.head = (r.head + drop) % len(r.buf)
+		r.size = capacity
+	}
+
+	newBuf := make([]*downloadResult, capacity)
+	newIndex := make(map[core.GID]int, capacity)
+	for i := 0; i < r.size; i++ {
+		pos := (r.head + i) % len(r.buf)
+		newBuf[i] = r.buf[pos]
+		newIndex[newBuf[i].gid] = i
+	}
+	r.buf = newBuf
+	r.index = newIndex
+	r.head = 0
+}
+
 func (r *stoppedRing) snapshotStatuses(offset, num int) []Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -184,15 +224,7 @@ func (r *stoppedRing) snapshotStatuses(offset, num int) []Status {
 	for i := 0; i < end-offset; i++ {
 		pos := (r.head + offset + i) % capacity
 		dr := r.buf[pos]
-		result = append(result, Status{
-			GID:          dr.gid,
-			Status:       dr.state,
-			ErrorCode:    dr.errCode,
-			ErrorMessage: dr.errMsg,
-			BelongsTo:    dr.belongsTo,
-			Following:    dr.following,
-			FollowedBy:   dr.followedBy,
-		})
+		result = append(result, cloneStatusSnapshot(dr.statusSnapshot))
 	}
 	return result
 }

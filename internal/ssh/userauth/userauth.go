@@ -6,18 +6,13 @@
 package userauth
 
 import (
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/sha512"
 	"fmt"
-	"math/big"
 
 	"github.com/smartass08/aria2go/internal/core"
 	"github.com/smartass08/aria2go/internal/ssh/wire"
+	xssh "golang.org/x/crypto/ssh"
 )
 
 // TransportConn is the interface the SSH transport layer must satisfy
@@ -133,12 +128,12 @@ func (c *Client) authenticatePassword(a *PasswordAuth) error {
 }
 
 func (c *Client) authenticatePublicKey(a *PublicKeyAuth, sessionID []byte) error {
-	keyAlg, pubBlob, privData, err := extractKey(a.Key)
+	keyAlg, pubBlob, signer, err := extractKey(a.Key)
 	if err != nil {
 		return err
 	}
 
-	sigAlg := signatureAlgorithm(keyAlg, privData)
+	sigAlg := signatureAlgorithm(keyAlg, signer)
 
 	// Probe if the server accepts this key (RFC 4252 §7).
 	{
@@ -175,7 +170,7 @@ func (c *Client) authenticatePublicKey(a *PublicKeyAuth, sessionID []byte) error
 	// Build the signature blob (RFC 4252 §7).
 	sigBlob := buildSignatureBlob(sessionID, a.Username, keyAlg, pubBlob)
 
-	signature, err := signPayload(sigAlg, privData, sigBlob)
+	signature, err := signPayload(sigAlg, signer, sigBlob)
 	if err != nil {
 		return err
 	}
@@ -359,86 +354,57 @@ func validatePKOK(payload []byte, expectedAlg string, expectedBlob []byte) error
 	return nil
 }
 
-// extractKey decomposes a private key into its SSH algorithm name, public key
-// blob, and the raw private key data. The returned algorithm name is the key
-// type (e.g., "ssh-rsa", "ssh-ed25519"), not the signature algorithm.
-func extractKey(key any) (alg string, pubBlob []byte, privData any, err error) {
+// extractKey decomposes a private key or signer into its SSH algorithm name,
+// public key blob, and signer implementation.
+func extractKey(key any) (alg string, pubBlob []byte, signer xssh.Signer, err error) {
 	switch k := key.(type) {
-	case *rsa.PrivateKey:
-		pub := &k.PublicKey
-		alg = "ssh-rsa"
-		b := wire.NewBuilder()
-		b.WriteString(alg)
-		b.WriteMpint(big.NewInt(int64(pub.E)))
-		b.WriteMpint(pub.N)
-		return alg, b.Payload(), k, nil
-	case ed25519.PrivateKey:
-		pub := k.Public().(ed25519.PublicKey)
-		alg = "ssh-ed25519"
-		b := wire.NewBuilder()
-		b.WriteString(alg)
-		b.WriteString(string(pub))
-		return alg, b.Payload(), k, nil
-	case *ecdsa.PrivateKey:
-		return "", nil, nil, fmt.Errorf("userauth: ECDSA keys not yet implemented")
+	case xssh.Signer:
+		pub := k.PublicKey()
+		return pub.Type(), pub.Marshal(), k, nil
 	default:
-		return "", nil, nil, fmt.Errorf("userauth: unsupported key type %T", key)
+		signer, err = xssh.NewSignerFromKey(key)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("userauth: unsupported key type %T: %w", key, err)
+		}
+		pub := signer.PublicKey()
+		return pub.Type(), pub.Marshal(), signer, nil
 	}
 }
 
 // signatureAlgorithm returns the SSH signature algorithm name for the given
-// key algorithm and private key data. For RSA, this is rsa-sha2-256 or
+// key algorithm and signer. For RSA, this is rsa-sha2-256 or
 // rsa-sha2-512 (RFC 8332) instead of the key type "ssh-rsa".
-func signatureAlgorithm(keyAlg string, privData any) string {
-	if keyAlg == "ssh-rsa" {
-		pk := privData.(*rsa.PrivateKey)
-		if pk.N.BitLen() >= 3072 {
-			return "rsa-sha2-512"
+func signatureAlgorithm(keyAlg string, signer xssh.Signer) string {
+	if keyAlg == xssh.KeyAlgoRSA {
+		if cryptoPub, ok := signer.PublicKey().(xssh.CryptoPublicKey); ok {
+			if rsaPub, ok := cryptoPub.CryptoPublicKey().(*rsa.PublicKey); ok && rsaPub.N.BitLen() >= 3072 {
+				return xssh.KeyAlgoRSASHA512
+			}
 		}
-		return "rsa-sha2-256"
+		return xssh.KeyAlgoRSASHA256
 	}
 	return keyAlg
 }
 
 // signPayload produces an SSH signature blob [string algorithm, string signature]
-// for the given data using the private key.
-func signPayload(sigAlg string, privData any, data []byte) ([]byte, error) {
-	switch pk := privData.(type) {
-	case *rsa.PrivateKey:
-		var hash crypto.Hash
-		switch sigAlg {
-		case "rsa-sha2-512":
-			hash = crypto.SHA512
-			sum := sha512.Sum512(data)
-			sig, err := rsa.SignPKCS1v15(rand.Reader, pk, hash, sum[:])
-			if err != nil {
-				return nil, fmt.Errorf("userauth: rsa sign: %w", err)
-			}
-			sb := wire.NewBuilder()
-			sb.WriteString(sigAlg)
-			sb.WriteString(string(sig))
-			return sb.Payload(), nil
-		default:
-			hash = crypto.SHA256
-			sum := sha256.Sum256(data)
-			sig, err := rsa.SignPKCS1v15(rand.Reader, pk, hash, sum[:])
-			if err != nil {
-				return nil, fmt.Errorf("userauth: rsa sign: %w", err)
-			}
-			sb := wire.NewBuilder()
-			sb.WriteString(sigAlg)
-			sb.WriteString(string(sig))
-			return sb.Payload(), nil
-		}
-	case ed25519.PrivateKey:
-		sig := ed25519.Sign(pk, data)
-		sb := wire.NewBuilder()
-		sb.WriteString(sigAlg)
-		sb.WriteString(string(sig))
-		return sb.Payload(), nil
-	default:
-		return nil, fmt.Errorf("userauth: unsupported private key type %T", privData)
+// for the given data using the signer.
+func signPayload(sigAlg string, signer xssh.Signer, data []byte) ([]byte, error) {
+	var (
+		sig *xssh.Signature
+		err error
+	)
+	if algorithmSigner, ok := signer.(xssh.AlgorithmSigner); ok {
+		sig, err = algorithmSigner.SignWithAlgorithm(rand.Reader, data, sigAlg)
+	} else {
+		sig, err = signer.Sign(rand.Reader, data)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("userauth: sign: %w", err)
+	}
+	sb := wire.NewBuilder()
+	sb.WriteString(sig.Format)
+	sb.WriteString(string(sig.Blob))
+	return sb.Payload(), nil
 }
 
 func buildSignatureBlob(sessionID []byte, username, keyAlg string, pubKeyBlob []byte) []byte {

@@ -1,6 +1,7 @@
 package ftp
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -27,6 +29,7 @@ type mockFTPServer struct {
 	mu       sync.Mutex
 	handlers map[string]mockResponse
 	commands []string
+	accepts  int
 }
 
 type mockResponse struct {
@@ -72,6 +75,9 @@ func (s *mockFTPServer) serve() {
 		if err != nil {
 			return
 		}
+		s.mu.Lock()
+		s.accepts++
+		s.mu.Unlock()
 		go s.handleConn(conn)
 	}
 }
@@ -79,13 +85,13 @@ func (s *mockFTPServer) serve() {
 func (s *mockFTPServer) handleConn(conn net.Conn) {
 	defer conn.Close()
 	fmt.Fprintf(conn, "220 FTP mock ready\r\n")
-	buf := make([]byte, 4096)
+	reader := bufio.NewReader(conn)
 	for {
-		n, err := conn.Read(buf)
+		line, err := reader.ReadString('\n')
 		if err != nil {
 			return
 		}
-		line := strings.TrimSpace(string(buf[:n]))
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -126,6 +132,12 @@ func (s *mockFTPServer) handleConn(conn net.Conn) {
 			fmt.Fprintf(conn, "%d %s\r\n", resp.code, resp.msg)
 		}
 	}
+}
+
+func (s *mockFTPServer) acceptCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.accepts
 }
 
 func (s *mockFTPServer) commandHistory() []string {
@@ -208,6 +220,29 @@ func TestDialAnonymousDefaultPassword(t *testing.T) {
 	}
 }
 
+func TestDialAsciiType(t *testing.T) {
+	srv := newMockFTPServer(t)
+	defer srv.close()
+
+	dialer, err := netx.NewDialer(netx.DialerConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("NewDialer: %v", err)
+	}
+
+	c, err := Dial(context.Background(), dialer, srv.addr, Opt{User: "test", Pass: "secret", Type: "ascii"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	c.Close()
+
+	for _, cmd := range srv.commandHistory() {
+		if cmd == "TYPE A" {
+			return
+		}
+	}
+	t.Fatalf("TYPE A command not observed: %v", srv.commandHistory())
+}
+
 func TestCmdsendRecv(t *testing.T) {
 	srv := newMockFTPServer(t)
 	defer srv.close()
@@ -269,6 +304,25 @@ func TestSizeParseError(t *testing.T) {
 	_, err = c.Size(context.Background(), "/file")
 	if err == nil {
 		t.Fatal("expected error for non-numeric SIZE response")
+	}
+}
+
+func TestSizeUnsupported(t *testing.T) {
+	srv := newMockFTPServer(t)
+	defer srv.close()
+
+	srv.setHandler("SIZE", mockResponse{code: 500, msg: "SIZE unsupported"})
+
+	dialer, _ := netx.NewDialer(netx.DialerConfig{Timeout: 5 * time.Second})
+	c, err := Dial(context.Background(), dialer, srv.addr, Opt{User: "test", Pass: "p", Passive: true})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	_, err = c.Size(context.Background(), "/file")
+	if !errors.Is(err, ErrSizeUnsupported) {
+		t.Fatalf("Size() error = %v, want ErrSizeUnsupported", err)
 	}
 }
 
@@ -716,22 +770,97 @@ func TestRetrieveWithRest(t *testing.T) {
 	<-done
 }
 
-func TestEPSVFallback(t *testing.T) {
+func TestCommandsPercentDecodePath(t *testing.T) {
 	dataLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("data listen: %v", err)
 	}
 	defer dataLn.Close()
-	dataAddr := dataLn.Addr().String()
-	_, dataPortStr, _ := net.SplitHostPort(dataAddr)
+
+	_, dataPortStr, _ := net.SplitHostPort(dataLn.Addr().String())
+	var dataPort int
+	fmt.Sscanf(dataPortStr, "%d", &dataPort)
+
+	srv := newMockFTPServer(t)
+	defer srv.close()
+	srv.setHandler("PASV", mockResponse{code: 227, msg: fmt.Sprintf("Entering Passive Mode (127,0,0,1,%d,%d).", dataPort/256, dataPort%256)})
+	srv.setHandler("EPSV", mockResponse{code: 229, msg: fmt.Sprintf("Entering Extended Passive Mode (|||%d|).", dataPort)})
+
+	dialer, _ := netx.NewDialer(netx.DialerConfig{Timeout: 5 * time.Second})
+	c, err := Dial(context.Background(), dialer, srv.addr, Opt{User: "test", Pass: "p", Passive: true})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.Size(context.Background(), "/dir/file%20name.txt"); err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if _, err := c.Mdtm(context.Background(), "/dir/file%20name.txt"); err != nil {
+		t.Fatalf("Mdtm: %v", err)
+	}
+	if err := c.Cwd(context.Background(), "/dir%20name"); err != nil {
+		t.Fatalf("Cwd: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dataConn, err := dataLn.Accept()
+		if err != nil {
+			return
+		}
+		defer dataConn.Close()
+		_, _ = io.WriteString(dataConn, "decoded-path")
+	}()
+
+	rc, err := c.Retrieve(context.Background(), "/dir/file%20name.txt", 0)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	<-done
+
+	history := srv.commandHistory()
+	for _, want := range []string{
+		"SIZE /dir/file name.txt",
+		"MDTM /dir/file name.txt",
+		"CWD /dir name",
+		"RETR /dir/file name.txt",
+	} {
+		found := false
+		for _, got := range history {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("command %q not observed in history %v", want, history)
+		}
+	}
+}
+
+func TestRetrievePassiveIPv4UsesPASV(t *testing.T) {
+	dataLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("data listen: %v", err)
+	}
+	defer dataLn.Close()
+	_, dataPortStr, _ := net.SplitHostPort(dataLn.Addr().String())
 	dataPort := 0
 	fmt.Sscanf(dataPortStr, "%d", &dataPort)
 
 	srv := newMockFTPServer(t)
 	defer srv.close()
 
-	srv.setHandler("EPSV", mockResponse{code: 229, msg: fmt.Sprintf("Entering Extended Passive Mode (|||%d|).", dataPort)})
-	srv.setHandler("PASV", mockResponse{code: 500, msg: "PASV not supported."})
+	srv.setHandler("PASV", mockResponse{code: 227, msg: fmt.Sprintf("Entering Passive Mode (127,0,0,1,%d,%d).", dataPort/256, dataPort%256)})
+	srv.setHandler("EPSV", mockResponse{code: 500, msg: "EPSV should not be used on IPv4."})
 
 	dialer, _ := netx.NewDialer(netx.DialerConfig{Timeout: 5 * time.Second})
 	c, err := Dial(context.Background(), dialer, srv.addr, Opt{User: "test", Pass: "p", Passive: true})
@@ -765,23 +894,243 @@ func TestEPSVFallback(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	<-done
+
+	for _, cmd := range srv.commandHistory() {
+		if strings.HasPrefix(cmd, "EPSV") {
+			t.Fatalf("unexpected EPSV command on IPv4 control connection: %v", srv.commandHistory())
+		}
+	}
+}
+
+func TestDialReusesControlConnection(t *testing.T) {
+	dataLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("data listen: %v", err)
+	}
+	defer dataLn.Close()
+
+	_, dataPortStr, _ := net.SplitHostPort(dataLn.Addr().String())
+	var dataPort int
+	fmt.Sscanf(dataPortStr, "%d", &dataPort)
+
+	srv := newMockFTPServer(t)
+	defer srv.close()
+	srv.setHandler("PASV", mockResponse{code: 227, msg: fmt.Sprintf("Entering Passive Mode (127,0,0,1,%d,%d).", dataPort/256, dataPort%256)})
+
+	payloads := []string{"first-transfer", "second-transfer"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, payload := range payloads {
+			conn, err := dataLn.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.WriteString(conn, payload)
+			_ = conn.Close()
+		}
+	}()
+
+	dialer, err := netx.NewDialer(netx.DialerConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("NewDialer: %v", err)
+	}
+
+	opt := Opt{User: "test", Pass: "p", Passive: true, ReuseConnection: true}
+	t.Cleanup(func() {
+		if pooled := ftpControlConnPool.pop(reuseControlConnKey(srv.addr, dialer, opt)); pooled != nil {
+			_ = pooled.closeUnderlying()
+		}
+	})
+
+	c1, err := Dial(context.Background(), dialer, srv.addr, opt)
+	if err != nil {
+		t.Fatalf("first Dial: %v", err)
+	}
+	rc1, err := c1.Retrieve(context.Background(), "/file.bin", 0)
+	if err != nil {
+		t.Fatalf("first Retrieve: %v", err)
+	}
+	data1, err := io.ReadAll(rc1)
+	if err != nil {
+		t.Fatalf("first ReadAll: %v", err)
+	}
+	if err := rc1.Close(); err != nil {
+		t.Fatalf("first body Close: %v", err)
+	}
+	if err := c1.Close(); err != nil {
+		t.Fatalf("first conn Close: %v", err)
+	}
+
+	c2, err := Dial(context.Background(), dialer, srv.addr, opt)
+	if err != nil {
+		t.Fatalf("second Dial: %v", err)
+	}
+	rc2, err := c2.Retrieve(context.Background(), "/file.bin", 0)
+	if err != nil {
+		t.Fatalf("second Retrieve: %v", err)
+	}
+	data2, err := io.ReadAll(rc2)
+	if err != nil {
+		t.Fatalf("second ReadAll: %v", err)
+	}
+	if err := rc2.Close(); err != nil {
+		t.Fatalf("second body Close: %v", err)
+	}
+	if err := c2.Close(); err != nil {
+		t.Fatalf("second conn Close: %v", err)
+	}
+	<-done
+
+	if string(data1) != payloads[0] {
+		t.Fatalf("first payload = %q, want %q", data1, payloads[0])
+	}
+	if string(data2) != payloads[1] {
+		t.Fatalf("second payload = %q, want %q", data2, payloads[1])
+	}
+	if got := srv.acceptCount(); got != 1 {
+		t.Fatalf("control connections = %d, want 1 reused connection", got)
+	}
 }
 
 func TestRetrieveActiveModeNotImplemented(t *testing.T) {
-	srv := newMockFTPServer(t)
-	defer srv.close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan []string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- nil
+			return
+		}
+		defer conn.Close()
+
+		fmt.Fprintf(conn, "220 FTP mock ready\r\n")
+		reader := bufio.NewReader(conn)
+		var commands []string
+		var activeAddr string
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				done <- commands
+				return
+			}
+			line = strings.TrimSpace(line)
+			commands = append(commands, line)
+			cmd, arg, _ := strings.Cut(line, " ")
+			switch cmd {
+			case "USER":
+				fmt.Fprintf(conn, "331 Password required.\r\n")
+			case "PASS":
+				fmt.Fprintf(conn, "230 Login successful.\r\n")
+			case "TYPE":
+				fmt.Fprintf(conn, "200 Type set.\r\n")
+			case "PWD":
+				fmt.Fprintf(conn, "257 \"/\"\r\n")
+			case "PORT":
+				activeAddr, err = parsePORTArg(arg)
+				if err != nil {
+					done <- commands
+					return
+				}
+				fmt.Fprintf(conn, "200 PORT command successful.\r\n")
+			case "EPRT":
+				activeAddr, err = parseEPRTArg(arg)
+				if err != nil {
+					done <- commands
+					return
+				}
+				fmt.Fprintf(conn, "200 EPRT command successful.\r\n")
+			case "REST":
+				fmt.Fprintf(conn, "350 Restarting at offset.\r\n")
+			case "RETR":
+				fmt.Fprintf(conn, "150 Opening data connection\r\n")
+				dataConn, err := net.Dial("tcp", activeAddr)
+				if err != nil {
+					t.Errorf("dial active endpoint: %v", err)
+					done <- commands
+					return
+				}
+				_, _ = io.WriteString(dataConn, "ACTIVE-DATA")
+				_ = dataConn.Close()
+				fmt.Fprintf(conn, "226 Transfer complete.\r\n")
+				done <- commands
+				return
+			default:
+				fmt.Fprintf(conn, "500 Unknown command.\r\n")
+			}
+		}
+	}()
 
 	dialer, _ := netx.NewDialer(netx.DialerConfig{Timeout: 5 * time.Second})
-	c, err := Dial(context.Background(), dialer, srv.addr, Opt{User: "test", Pass: "p", Passive: false})
+	c, err := Dial(context.Background(), dialer, ln.Addr().String(), Opt{User: "test", Pass: "p", Passive: false})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer c.Close()
 
-	_, err = c.Retrieve(context.Background(), "/file.bin", 0)
-	if err == nil {
-		t.Fatal("expected active mode error")
+	rc, err := c.Retrieve(context.Background(), "/file.bin", 0)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
 	}
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(data) != "ACTIVE-DATA" {
+		t.Fatalf("data = %q, want ACTIVE-DATA", string(data))
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	commands := <-done
+	var sawPort bool
+	for _, cmd := range commands {
+		if strings.HasPrefix(cmd, "PORT ") || strings.HasPrefix(cmd, "EPRT ") {
+			sawPort = true
+			break
+		}
+	}
+	if !sawPort {
+		t.Fatalf("active mode command missing: %v", commands)
+	}
+}
+
+func parsePORTArg(arg string) (string, error) {
+	parts := strings.Split(arg, ",")
+	if len(parts) != 6 {
+		return "", fmt.Errorf("PORT arg = %q, want 6 fields", arg)
+	}
+	p1, err := parseInt(parts[4])
+	if err != nil {
+		return "", err
+	}
+	p2, err := parseInt(parts[5])
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s.%s.%s.%s:%d", parts[0], parts[1], parts[2], parts[3], p1*256+p2), nil
+}
+
+func parseEPRTArg(arg string) (string, error) {
+	parts := strings.Split(arg, "|")
+	if len(parts) != 5 {
+		return "", fmt.Errorf("EPRT arg = %q, want 5 fields", arg)
+	}
+	return net.JoinHostPort(parts[2], parts[3]), nil
+}
+
+func parseInt(s string) (int, error) {
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return 0, fmt.Errorf("parse %q: %w", s, err)
+	}
+	return n, nil
 }
 
 func TestRetrieveRejectsWrongPreliminaryStatus(t *testing.T) {
@@ -797,6 +1146,7 @@ func TestRetrieveRejectsWrongPreliminaryStatus(t *testing.T) {
 
 	srv := newMockFTPServer(t)
 	defer srv.close()
+	srv.setHandler("PASV", mockResponse{code: 227, msg: fmt.Sprintf("Entering Passive Mode (127,0,0,1,%d,%d).", dataPort/256, dataPort%256)})
 	srv.setHandler("EPSV", mockResponse{code: 229, msg: fmt.Sprintf("Entering Extended Passive Mode (|||%d|).", dataPort)})
 	srv.setHandler("RETR", mockResponse{code: 120, msg: "Service ready soon."})
 
@@ -837,6 +1187,7 @@ func TestRetrieveCloseChecksFinalStatus(t *testing.T) {
 
 	srv := newMockFTPServer(t)
 	defer srv.close()
+	srv.setHandler("PASV", mockResponse{code: 227, msg: fmt.Sprintf("Entering Passive Mode (127,0,0,1,%d,%d).", dataPort/256, dataPort%256)})
 	srv.setHandler("EPSV", mockResponse{code: 229, msg: fmt.Sprintf("Entering Extended Passive Mode (|||%d|).", dataPort)})
 	srv.setHandler("RETR", mockResponse{multi: []string{
 		"150 Opening data connection",

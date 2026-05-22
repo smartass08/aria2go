@@ -101,10 +101,11 @@ var escBufPool = sync.Pool{
 
 // Request is a JSON-RPC 2.0 request object.
 type Request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
+	JSONRPC         string          `json:"jsonrpc"`
+	ID              json.RawMessage `json:"id"`
+	Method          string          `json:"method"`
+	Params          json.RawMessage `json:"params"`
+	ValidationError *Error          `json:"-"`
 }
 
 // Response is a JSON-RPC 2.0 response object.
@@ -161,7 +162,7 @@ func Decode(data []byte) (single *Request, batch []Request, err error) {
 		batch, err = decodeBatch(data)
 		return
 	default:
-		err = &Error{Code: ErrCodeParse, Message: MsgParseError}
+		single, err = decodeNonObjectSingle(data)
 		return
 	}
 }
@@ -181,6 +182,25 @@ func trimSpace(data []byte) []byte {
 }
 
 func decodeSingle(data []byte) (*Request, error) {
+	return decodeRequest(data, true)
+}
+
+func decodeNonObjectSingle(data []byte) (*Request, error) {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, &Error{Code: ErrCodeParse, Message: MsgParseError}
+	}
+	return &Request{
+		JSONRPC: "2.0",
+		Params:  json.RawMessage("[]"),
+		ValidationError: &Error{
+			Code:    ErrCodeInvalidRequest,
+			Message: MsgInvalidRequest,
+		},
+	}, nil
+}
+
+func decodeRequest(data []byte, lenient bool) (*Request, error) {
 	var reqMap map[string]json.RawMessage
 	if err := json.Unmarshal(data, &reqMap); err != nil {
 		return nil, &Error{Code: ErrCodeParse, Message: MsgParseError}
@@ -192,32 +212,47 @@ func decodeSingle(data []byte) (*Request, error) {
 	// id is optional here; the transport layer rejects notifications.
 	id, _ := reqMap["id"]
 
+	req := &Request{
+		JSONRPC: "2.0",
+		ID:      id,
+		Params:  json.RawMessage("[]"),
+	}
+
 	// method is required.
 	methodRaw, ok := reqMap["method"]
 	if !ok {
+		if lenient {
+			req.ValidationError = &Error{Code: ErrCodeInvalidRequest, Message: MsgInvalidRequest}
+			return req, nil
+		}
 		return nil, &Error{Code: ErrCodeInvalidRequest, Message: MsgInvalidRequest}
 	}
 	var method string
 	if err := json.Unmarshal(methodRaw, &method); err != nil {
+		if lenient {
+			req.ValidationError = &Error{Code: ErrCodeInvalidRequest, Message: MsgInvalidRequest}
+			return req, nil
+		}
 		return nil, &Error{Code: ErrCodeInvalidRequest, Message: MsgInvalidRequest}
 	}
+	req.Method = method
 
 	// params is optional; defaults to empty array.
 	params, _ := reqMap["params"]
 	if params != nil {
-		if len(params) > 0 && params[0] != '[' {
+		if trimmed := trimSpace(params); len(trimmed) > 0 && trimmed[0] != '[' {
+			if lenient {
+				req.ValidationError = &Error{Code: ErrCodeInvalidParams, Message: MsgInvalidParams}
+				return req, nil
+			}
 			return nil, &Error{Code: ErrCodeInvalidParams, Message: MsgInvalidParams}
 		}
+		req.Params = params
 	} else {
-		params = json.RawMessage("[]")
+		req.Params = json.RawMessage("[]")
 	}
 
-	return &Request{
-		JSONRPC: "2.0",
-		ID:      id,
-		Method:  method,
-		Params:  params,
-	}, nil
+	return req, nil
 }
 
 func decodeBatch(data []byte) ([]Request, error) {
@@ -233,7 +268,7 @@ func decodeBatch(data []byte) ([]Request, error) {
 		if len(trimmed) == 0 || trimmed[0] != '{' {
 			continue
 		}
-		req, err := decodeSingle(raw)
+		req, err := decodeRequest(raw, true)
 		if err != nil {
 			return nil, err
 		}

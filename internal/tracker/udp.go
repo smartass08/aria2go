@@ -276,7 +276,7 @@ func buildAnnounceRequest(buf []byte, connID uint64, txnID uint32, req AnnounceR
 	}
 	binary.BigEndian.PutUint32(buf[88:92], udpKey(req.Key))
 	numWant := int32(req.NumWant)
-	if req.NumWant == 0 {
+	if req.NumWant < 0 {
 		numWant = -1
 	}
 	binary.BigEndian.PutUint32(buf[92:96], uint32(numWant))

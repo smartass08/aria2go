@@ -7,7 +7,6 @@
 package aria2c
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -16,7 +15,6 @@ import (
 	"github.com/smartass08/aria2go/internal/config"
 	"github.com/smartass08/aria2go/internal/core"
 	"github.com/smartass08/aria2go/internal/engine"
-	"github.com/smartass08/aria2go/internal/protocol/metalink"
 )
 
 // Daemon encapsulates the download engine and provides a frozen, concurrency-safe
@@ -93,28 +91,14 @@ func (d *Daemon) AddTorrent(data []byte, opts *config.Options) (core.GID, error)
 }
 
 // AddMetalink adds a metalink download. data is the raw metalink XML.
-// URIs are extracted from the parsed metalink and submitted as a single
-// multi-URI download.
-func (d *Daemon) AddMetalink(data []byte, opts *config.Options) (core.GID, error) {
-	doc, err := metalink.Parse(bytes.NewReader(data))
+// It returns one GID per selected metalink file, matching aria2's multi-GID
+// metalink behavior.
+func (d *Daemon) AddMetalink(data []byte, opts *config.Options) ([]core.GID, error) {
+	gids, err := d.eng.AddMetalink(data, opts, 0, false)
 	if err != nil {
-		return 0, fmt.Errorf("aria2c: metalink parse: %w", err)
+		return nil, fmt.Errorf("aria2c: add metalink: %w", err)
 	}
-
-	var uris []string
-	for _, f := range doc.Files {
-		for _, u := range f.URLs {
-			uris = append(uris, u.URL)
-		}
-	}
-	if len(uris) == 0 {
-		return 0, fmt.Errorf("aria2c: metalink contains no URIs")
-	}
-
-	return d.eng.Add(engine.AddSpec{
-		URIs:    uris,
-		Options: opts,
-	})
+	return gids, nil
 }
 
 // RPCAddr returns the RPC listen address if RPC is enabled (EnableRPC=true),

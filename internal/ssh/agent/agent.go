@@ -1,49 +1,98 @@
-// Package agent provides a stub local SSH agent IPC client.
-//
-// In aria2, libssh2 supports agent authentication through
-// libssh2_agent_connect() / libssh2_agent_list_identities() /
-// libssh2_agent_userauth(). This package provides a stub implementation
-// that returns "not implemented" for all operations, matching the
-// incomplete state of the SSH agent support in this codebase.
-//
-// When the full SSH agent implementation is ready, this package will
-// communicate with the local SSH agent via the Unix domain socket at
-// $SSH_AUTH_SOCK using the SSH agent protocol (RFC draft).
+// Package agent provides a local SSH agent client used for SFTP public-key
+// authentication.
 package agent
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
+
+	xssh "golang.org/x/crypto/ssh"
+	xagent "golang.org/x/crypto/ssh/agent"
 )
 
-// ErrNotImplemented is returned by all agent operations.
-var ErrNotImplemented = fmt.Errorf("ssh/agent: not implemented")
+var ErrUnavailable = errors.New("ssh/agent: unavailable")
 
 // Agent represents a connection to the local SSH agent.
-type Agent struct{}
+type Agent struct {
+	conn   net.Conn
+	client xagent.ExtendedAgent
+}
 
-// New creates a new Agent connection stub.
+// New creates a new Agent using SSH_AUTH_SOCK.
 func New() (*Agent, error) {
-	return nil, fmt.Errorf("%w (agent connection not yet implemented)", ErrNotImplemented)
+	socketPath := os.Getenv("SSH_AUTH_SOCK")
+	if socketPath == "" {
+		return nil, fmt.Errorf("%w: SSH_AUTH_SOCK is not set", ErrUnavailable)
+	}
+	a := &Agent{}
+	if err := a.Connect(socketPath); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
-// Connect attempts to connect to the local SSH agent socket.
+// Connect connects to the local SSH agent socket.
 func (a *Agent) Connect(socketPath string) error {
-	return fmt.Errorf("%w (agent connection not yet implemented)", ErrNotImplemented)
-}
-
-// Close closes the connection to the SSH agent.
-func (a *Agent) Close() error {
+	if socketPath == "" {
+		return fmt.Errorf("%w: empty socket path", ErrUnavailable)
+	}
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	a.conn = conn
+	a.client = xagent.NewClient(conn)
 	return nil
 }
 
-// List returns the list of identities available from the agent.
-func (a *Agent) List() ([]Identity, error) {
-	return nil, fmt.Errorf("%w (agent identity listing not yet implemented)", ErrNotImplemented)
+// Close closes the agent connection.
+func (a *Agent) Close() error {
+	if a.conn == nil {
+		return nil
+	}
+	err := a.conn.Close()
+	a.conn = nil
+	a.client = nil
+	return err
 }
 
-// Sign signs the given data with the specified identity.
+// List returns the identities available from the agent.
+func (a *Agent) List() ([]Identity, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("%w: not connected", ErrUnavailable)
+	}
+	keys, err := a.client.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Identity, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, Identity{
+			Comment: key.Comment,
+			KeyType: key.Format,
+			KeyBlob: append([]byte(nil), key.Blob...),
+		})
+	}
+	return out, nil
+}
+
+// Sign signs data with the identity whose key blob exactly matches keyID.
 func (a *Agent) Sign(keyID string, data []byte) ([]byte, error) {
-	return nil, fmt.Errorf("%w (agent signing not yet implemented)", ErrNotImplemented)
+	if a.client == nil {
+		return nil, fmt.Errorf("%w: not connected", ErrUnavailable)
+	}
+	pub, err := xssh.ParsePublicKey([]byte(keyID))
+	if err != nil {
+		return nil, fmt.Errorf("ssh/agent: parse key id: %w", err)
+	}
+	sig, err := a.client.Sign(pub, data)
+	if err != nil {
+		return nil, err
+	}
+	return marshalSignature(sig), nil
 }
 
 // Identity represents an SSH key identity in the agent.
@@ -52,3 +101,74 @@ type Identity struct {
 	KeyType string
 	KeyBlob []byte
 }
+
+// Signer implements ssh.Signer/ssh.AlgorithmSigner over the agent protocol.
+type Signer struct {
+	agent    *Agent
+	identity Identity
+	pub      xssh.PublicKey
+}
+
+// NewSigner returns a signer wrapper for the given identity.
+func NewSigner(agent *Agent, identity Identity) *Signer {
+	pub, _ := xssh.ParsePublicKey(identity.KeyBlob)
+	return &Signer{
+		agent:    agent,
+		identity: identity,
+		pub:      pub,
+	}
+}
+
+// PublicKey returns the signer's public key.
+func (s *Signer) PublicKey() xssh.PublicKey {
+	return s.pub
+}
+
+// Sign signs data using the agent's default signature selection.
+func (s *Signer) Sign(_ io.Reader, data []byte) (*xssh.Signature, error) {
+	if s.agent == nil || s.agent.client == nil {
+		return nil, fmt.Errorf("%w: not connected", ErrUnavailable)
+	}
+	if s.pub == nil {
+		return nil, errors.New("ssh/agent: public key unavailable")
+	}
+	return s.agent.client.Sign(s.pub, data)
+}
+
+// SignWithAlgorithm signs data using the requested SSH signature algorithm.
+func (s *Signer) SignWithAlgorithm(_ io.Reader, data []byte, algorithm string) (*xssh.Signature, error) {
+	if s.agent == nil || s.agent.client == nil {
+		return nil, fmt.Errorf("%w: not connected", ErrUnavailable)
+	}
+	if s.pub == nil {
+		return nil, errors.New("ssh/agent: public key unavailable")
+	}
+
+	flags := xagent.SignatureFlags(0)
+	switch algorithm {
+	case xssh.KeyAlgoRSASHA256:
+		flags = xagent.SignatureFlagRsaSha256
+	case xssh.KeyAlgoRSASHA512:
+		flags = xagent.SignatureFlagRsaSha512
+	}
+	return s.agent.client.SignWithFlags(s.pub, data, flags)
+}
+
+func marshalSignature(sig *xssh.Signature) []byte {
+	if sig == nil {
+		return nil
+	}
+	out := make([]byte, 0, 8+len(sig.Format)+len(sig.Blob))
+	out = appendUint32(out, uint32(len(sig.Format)))
+	out = append(out, sig.Format...)
+	out = appendUint32(out, uint32(len(sig.Blob)))
+	out = append(out, sig.Blob...)
+	return out
+}
+
+func appendUint32(dst []byte, v uint32) []byte {
+	return append(dst, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+var _ xssh.Signer = (*Signer)(nil)
+var _ xssh.AlgorithmSigner = (*Signer)(nil)

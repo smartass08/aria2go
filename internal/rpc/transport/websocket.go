@@ -225,14 +225,16 @@ func isControlFrame(opcode byte) bool {
 
 // websocketSession represents a single WebSocket connection.
 type websocketSession struct {
-	conn       *websocketConn
-	outbox     chan []byte
-	done       chan struct{}
-	logger     *slog.Logger
-	closeMu    sync.Mutex
-	closed     bool
-	secret     string
-	maxReqSize int64
+	conn         *websocketConn
+	outbox       chan []byte
+	done         chan struct{}
+	logger       *slog.Logger
+	closeMu      sync.Mutex
+	closed       bool
+	secret       string
+	maxReqSize   int64
+	messageType  byte
+	messageBytes []byte
 }
 
 // newWebsocketSession creates a new session wrapping the given connection.
@@ -295,16 +297,36 @@ func (s *websocketSession) readLoop(ctx context.Context, dispatcher Dispatcher) 
 			s.sendClose(closeProtocolErr, "unmasked client frame")
 			return
 		}
+		if isControlFrame(frame.opcode) && !frame.fin {
+			frame.free()
+			s.sendClose(closeProtocolErr, "fragmented control frame")
+			return
+		}
 
 		switch frame.opcode {
 		case opText, opBinary:
-			if !frame.fin {
+			if s.messageType != 0 {
 				frame.free()
-				s.sendClose(closePolicy, "fragmented messages not supported")
+				s.sendClose(closeProtocolErr, "unexpected data frame")
 				return
 			}
-			if frame.opcode == opText {
-				s.handleTextMessage(frame.payload, dispatcher)
+			s.appendMessagePayload(frame.payload)
+			if frame.fin {
+				s.finishMessage(dispatcher)
+			} else {
+				s.messageType = frame.opcode
+			}
+			frame.free()
+
+		case opContinuation:
+			if s.messageType == 0 {
+				frame.free()
+				s.sendClose(closeProtocolErr, "unexpected continuation frame")
+				return
+			}
+			s.appendMessagePayload(frame.payload)
+			if frame.fin {
+				s.finishMessage(dispatcher)
 			}
 			frame.free()
 
@@ -328,15 +350,30 @@ func (s *websocketSession) readLoop(ctx context.Context, dispatcher Dispatcher) 
 	}
 }
 
-func (s *websocketSession) handleTextMessage(payload []byte, dispatcher Dispatcher) {
-	// Enforce max request size at the parser level, matching aria2 behavior.
-	// If payload exceeds maxReqSize, silently truncate (feed no data to parser).
-	if s.maxReqSize > 0 && int64(len(payload)) > s.maxReqSize {
-		// Matching aria2: silently ignore oversized messages.
-		// The parser never completes, so no error response is sent.
+func (s *websocketSession) appendMessagePayload(payload []byte) {
+	if len(payload) == 0 {
 		return
 	}
+	if s.maxReqSize > 0 {
+		remaining := s.maxReqSize - int64(len(s.messageBytes))
+		if remaining <= 0 {
+			return
+		}
+		if int64(len(payload)) > remaining {
+			payload = payload[:remaining]
+		}
+	}
+	s.messageBytes = append(s.messageBytes, payload...)
+}
 
+func (s *websocketSession) finishMessage(dispatcher Dispatcher) {
+	payload := append([]byte(nil), s.messageBytes...)
+	s.messageType = 0
+	s.messageBytes = s.messageBytes[:0]
+	s.handleMessage(payload, dispatcher)
+}
+
+func (s *websocketSession) handleMessage(payload []byte, dispatcher Dispatcher) {
 	single, batch, err := jsonrpc.Decode(payload)
 	if err != nil {
 		s.sendError(-32700, "Parse error.")
@@ -344,10 +381,6 @@ func (s *websocketSession) handleTextMessage(payload []byte, dispatcher Dispatch
 	}
 
 	if single != nil {
-		if single.IsNotification() {
-			s.sendResponse(jsonrpc.NewErrorResponse(single, -32600, "Invalid Request."))
-			return
-		}
 		s.processSingle(single, dispatcher)
 		return
 	}
@@ -355,6 +388,14 @@ func (s *websocketSession) handleTextMessage(payload []byte, dispatcher Dispatch
 }
 
 func (s *websocketSession) processSingle(req *jsonrpc.Request, dispatcher Dispatcher) {
+	if req.ValidationError != nil {
+		s.sendResponse(jsonrpc.NewErrorResponse(req, req.ValidationError.Code, req.ValidationError.Message))
+		return
+	}
+	if req.IsNotification() {
+		s.sendResponse(jsonrpc.NewInvalidRequestError(nil))
+		return
+	}
 	params, err := extractJSONParamsWS(req.Params)
 	if err != nil {
 		s.sendResponse(jsonrpc.NewErrorResponse(req, -32700, "Parse error."))
@@ -387,7 +428,12 @@ func (s *websocketSession) processBatch(batch []jsonrpc.Request, dispatcher Disp
 	unauthorized := false
 	for i := range batch {
 		req := &batch[i]
+		if req.ValidationError != nil {
+			responses = append(responses, jsonrpc.NewErrorResponse(req, req.ValidationError.Code, req.ValidationError.Message))
+			continue
+		}
 		if req.IsNotification() {
+			responses = append(responses, jsonrpc.NewInvalidRequestError(nil))
 			continue
 		}
 		params, err := extractJSONParamsWS(req.Params)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/smartass08/aria2go/internal/core"
 	"github.com/smartass08/aria2go/internal/engine"
 	"github.com/smartass08/aria2go/internal/log"
+	"github.com/smartass08/aria2go/internal/protocol/metalink"
 	"github.com/smartass08/aria2go/internal/rpc/dispatcher"
 	"github.com/smartass08/aria2go/internal/torrent"
 )
@@ -27,6 +29,7 @@ const (
 	version     = "1.37.0"
 	packageName = "aria2"
 	bannerLine  = packageName + " " + version
+	daemonEnv   = "ARIA2GO_DAEMONIZED"
 )
 
 var (
@@ -127,7 +130,14 @@ func main() {
 	}
 
 	exitCode := run()
-	os.Exit(int(exitCode))
+	os.Exit(publicExitCode(exitCode))
+}
+
+func publicExitCode(code core.ErrorCode) int {
+	if code == core.ExitInProgress {
+		return int(core.ExitUnfinishedDownloads)
+	}
+	return int(code)
 }
 
 func run() core.ErrorCode {
@@ -201,7 +211,7 @@ func run() core.ErrorCode {
 	setRLimitNOFILE(opts, logger)
 
 	// 6. Daemon mode: fork to background, parent exits (matching aria2 C++).
-	if opts.Daemon {
+	if opts.Daemon && os.Getenv(daemonEnv) == "" {
 		if daemonize() != 0 {
 			logger.Error("daemon failed")
 			return core.ExitUnknownError
@@ -219,11 +229,20 @@ func run() core.ErrorCode {
 	//    positional args that look like torrent/metalink files.
 	if opts.ShowFiles {
 		if opts.TorrentFile != "" || opts.MetalinkFile != "" {
-			showFileContents(opts.TorrentFile, opts.MetalinkFile, logger)
+			showFileContents(opts.TorrentFile, opts.MetalinkFile, opts, logger)
 			return core.ExitSuccess
 		}
-		showPositionalFiles(positionals, logger)
+		showPositionalFiles(positionals, opts, logger)
 		return core.ExitSuccess
+	}
+
+	// 9. Handle input-file startup semantics before the engine snapshots the
+	// initial template for eager input-file processing.
+	if opts.InputFile != "" {
+		if opts.DeferredInput && opts.SaveSession != "" {
+			logger.Warn("--deferred-input is disabled because --save-session is set")
+			opts.DeferredInput = false
+		}
 	}
 
 	// 9. Create engine.
@@ -252,7 +271,7 @@ func run() core.ErrorCode {
 	downloadCount := 0
 	if shouldAddStandalonePositionals(opts) {
 		for _, uri := range positionals {
-			added, addErr := addDownloadSource(eng, opts, uri)
+			added, addErr := addDownloadSource(eng, opts, cliOpts, uri)
 			if addErr != nil {
 				logger.Error("Failed to add download source", "uri", uri, "error", addErr)
 			} else {
@@ -261,30 +280,17 @@ func run() core.ErrorCode {
 		}
 	}
 	if opts.TorrentFile != "" {
-		if addErr := addTorrentFile(eng, opts, opts.TorrentFile, positionals...); addErr != nil {
+		if addErr := addTorrentFile(eng, opts, cliOpts, opts.TorrentFile, positionals...); addErr != nil {
 			logger.Error("Failed to add torrent file", "path", opts.TorrentFile, "error", addErr)
 		} else {
 			downloadCount++
 		}
 	}
 	if opts.MetalinkFile != "" {
-		if addErr := addMetalinkFile(eng, opts, opts.MetalinkFile); addErr != nil {
+		if addErr := addMetalinkFile(eng, opts, cliOpts, opts.MetalinkFile); addErr != nil {
 			logger.Error("Failed to add metalink file", "path", opts.MetalinkFile, "error", addErr)
 		} else {
 			downloadCount++
-		}
-	}
-
-	// 12. Handle input-file.
-	//    aria2 C++ Context.cc:273-279: if --deferred-input is true, create a
-	//    UriListParser that reads URIs incrementally from the input file. The
-	//    parser is attached to the engine and consumed as downloads progress.
-	//    TODO: implement UriListParser in internal/uri-list-parser/ and wire
-	//    it into engine.Run(). For now, Engine.Run eagerly loads entries.
-	if opts.InputFile != "" {
-		if opts.DeferredInput && opts.SaveSession != "" {
-			logger.Warn("--deferred-input is disabled because --save-session is set")
-			opts.DeferredInput = false
 		}
 	}
 
@@ -309,16 +315,10 @@ func run() core.ErrorCode {
 		logger.Info("Downloading " + strconv.Itoa(downloadCount) + " item(s)")
 	}
 
-	// 14. Remove one-shot CLI-only options from the template so they
-	//      don't affect RPC-created or dynamically-added downloads.
-	//      Mirrors Context.cc:295-302.
-	opts.Out = ""
-	opts.ForceSequential = false
-	opts.IndexOut = nil
-	opts.SelectFile = ""
-	opts.Pause = false
-	opts.Checksum = ""
-	opts.GID = ""
+	// 14. Remove one-shot startup options from the runtime template so they do
+	// not affect deferred-input, RPC-created, or dynamically-added downloads.
+	// Mirrors Context.cc:293-300.
+	cleanupPostStartupTemplate(opts)
 
 	// 15. Signal handling: SIGINT first → graceful halt, second → force.
 	//     SIGTERM/SIGHUP → force immediately where the platform exposes them.
@@ -331,20 +331,21 @@ func run() core.ErrorCode {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
+	defer signal.Stop(sigCh)
 
 	go func() {
-		haltCount := 0
+		signalCount := 0
+		interruptSeen := false
 		for sig := range sigCh {
-			haltCount++
-			forceShutdown := true
+			signalCount++
+			forceShutdown := !isInterruptSignal(sig)
 			if isInterruptSignal(sig) {
-				if haltCount < 2 {
-					forceShutdown = false
-				}
+				forceShutdown = interruptSeen
+				interruptSeen = true
 			}
 			logger.Info("Signal received",
 				"signal", sig.String(),
-				"signal_count", haltCount,
+				"signal_count", signalCount,
 				"force", forceShutdown,
 			)
 			_ = eng.Shutdown(forceShutdown)
@@ -355,6 +356,7 @@ func run() core.ErrorCode {
 	runErr := eng.Run(ctx)
 	if runErr != nil {
 		logger.Error("Engine run error", "error", runErr)
+		return core.ExitUnknownError
 	}
 
 	// 17. Save session on exit.
@@ -369,12 +371,62 @@ func run() core.ErrorCode {
 	return eng.ExitCode()
 }
 
+func cleanupPostStartupTemplate(opts *config.Options) {
+	if opts == nil {
+		return
+	}
+
+	opts.Out = ""
+	opts.ClearExplicit("out")
+
+	opts.ForceSequential = false
+	opts.ClearExplicit("force-sequential")
+
+	opts.InputFile = ""
+	opts.ClearExplicit("input-file")
+
+	opts.IndexOut = nil
+	opts.ClearExplicit("index-out")
+
+	opts.SelectFile = ""
+	opts.ClearExplicit("select-file")
+
+	opts.Pause = false
+	opts.ClearExplicit("pause")
+
+	opts.Checksum = ""
+	opts.ClearExplicit("checksum")
+
+	opts.GID = ""
+	opts.ClearExplicit("gid")
+}
+
 func showVersion(w io.Writer) {
 	io.WriteString(w, versionText)
 	io.WriteString(w, goCompilerLine+"\n")
 	io.WriteString(w, "System: "+runtime.GOOS+" "+runtime.GOARCH+"\n")
 	io.WriteString(w, "\nReport bugs to https://github.com/smartass08/aria2go/issues\n")
 	io.WriteString(w, "Visit https://github.com/smartass08/aria2go\n")
+}
+
+func daemonChildArgs(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+
+	args := make([]string, 0, len(argv))
+	args = append(args, argv[0])
+	for _, arg := range argv[1:] {
+		switch {
+		case arg == "--daemon", arg == "-D":
+			continue
+		case strings.HasPrefix(arg, "--daemon="), strings.HasPrefix(arg, "-D="):
+			continue
+		default:
+			args = append(args, arg)
+		}
+	}
+	return args
 }
 
 var helpTags = map[string]string{
@@ -759,15 +811,15 @@ type downloadAdder interface {
 	Add(engine.AddSpec) (core.GID, error)
 }
 
-func addDownloadSource(adder downloadAdder, opts *config.Options, source string) (int, error) {
+func addDownloadSource(adder downloadAdder, effectiveOpts, localOpts *config.Options, source string) (int, error) {
 	switch {
 	case guessTorrentFile(source):
-		return 1, addTorrentFile(adder, opts, source)
+		return 1, addTorrentFile(adder, effectiveOpts, localOpts, source)
 	case guessMetalinkFile(source):
-		return 1, addMetalinkFile(adder, opts, source)
+		return 1, addMetalinkFile(adder, effectiveOpts, localOpts, source)
 	default:
 		uris := []string{source}
-		if opts != nil && opts.ParameterizedURI {
+		if effectiveOpts != nil && effectiveOpts.ParameterizedURI {
 			expanded, err := config.ExpandParameterizedURI(source)
 			if err != nil {
 				return 0, err
@@ -777,15 +829,15 @@ func addDownloadSource(adder downloadAdder, opts *config.Options, source string)
 		if len(uris) == 0 {
 			return 0, nil
 		}
-		if opts != nil && opts.ForceSequential {
+		if effectiveOpts != nil && effectiveOpts.ForceSequential {
 			for _, uri := range uris {
-				if _, err := adder.Add(engine.AddSpec{URIs: []string{uri}, Options: opts}); err != nil {
+				if _, err := adder.Add(engine.AddSpec{URIs: []string{uri}, Options: localOpts}); err != nil {
 					return 0, err
 				}
 			}
 			return len(uris), nil
 		}
-		_, err := adder.Add(engine.AddSpec{URIs: uris, Options: opts})
+		_, err := adder.Add(engine.AddSpec{URIs: uris, Options: localOpts})
 		return 1, err
 	}
 }
@@ -797,28 +849,33 @@ func shouldAddStandalonePositionals(opts *config.Options) bool {
 	return opts.TorrentFile == "" && opts.MetalinkFile == "" && opts.InputFile == ""
 }
 
-func addTorrentFile(adder downloadAdder, opts *config.Options, path string, webSeedURIs ...string) error {
+func addTorrentFile(adder downloadAdder, effectiveOpts, localOpts *config.Options, path string, webSeedURIs ...string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read torrent file %s: %w", path, err)
 	}
 	uris := append([]string(nil), webSeedURIs...)
-	if opts != nil && opts.ParameterizedURI {
+	if effectiveOpts != nil && effectiveOpts.ParameterizedURI {
 		uris, err = config.ExpandParameterizedURIs(uris)
 		if err != nil {
 			return err
 		}
 	}
-	_, err = adder.Add(engine.AddSpec{URIs: uris, Torrent: data, Options: opts})
+	_, err = adder.Add(engine.AddSpec{
+		URIs:        uris,
+		Torrent:     data,
+		Options:     localOpts,
+		MetadataURI: path,
+	})
 	return err
 }
 
-func addMetalinkFile(adder downloadAdder, opts *config.Options, path string) error {
+func addMetalinkFile(adder downloadAdder, _, localOpts *config.Options, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read metalink file %s: %w", path, err)
 	}
-	_, err = adder.Add(engine.AddSpec{Metalink: data, Options: opts})
+	_, err = adder.Add(engine.AddSpec{Metalink: data, Options: localOpts, MetadataURI: path})
 	return err
 }
 
@@ -906,25 +963,25 @@ func setupLogger(opts *config.Options) (*slog.Logger, *os.File, error) {
 	return logger, outFile, nil
 }
 
-func showFileContents(torrentFile, metalinkFile string, logger *slog.Logger) {
+func showFileContents(torrentFile, metalinkFile string, opts *config.Options, logger *slog.Logger) {
 	if torrentFile != "" {
 		fmt.Fprintf(os.Stdout, ">>> Printing the contents of file '%s'...\n", torrentFile)
 		showTorrentFile(torrentFile)
 	}
 	if metalinkFile != "" {
 		fmt.Fprintf(os.Stdout, ">>> Printing the contents of file '%s'...\n", metalinkFile)
-		showMetalinkFile(metalinkFile)
+		showMetalinkFile(metalinkFile, opts)
 	}
 }
 
-func showPositionalFiles(positionals []string, logger *slog.Logger) {
+func showPositionalFiles(positionals []string, opts *config.Options, logger *slog.Logger) {
 	for _, uri := range positionals {
 		fmt.Fprintf(os.Stdout, ">>> Printing the contents of file '%s'...\n", uri)
 		switch {
 		case guessTorrentFile(uri):
 			showTorrentFile(uri)
 		case guessMetalinkFile(uri):
-			showMetalinkFile(uri)
+			showMetalinkFile(uri, opts)
 		default:
 			io.WriteString(os.Stderr, "This file is neither Torrent nor Metalink file.\n\n")
 		}
@@ -967,8 +1024,20 @@ func showTorrentFile(path string) {
 	printTorrentFileInfo(os.Stdout, meta)
 }
 
-func showMetalinkFile(path string) {
-	io.WriteString(os.Stderr, "aria2go: metalink file display not yet implemented\n")
+func showMetalinkFile(path string, opts *config.Options) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aria2go: cannot read metalink file: %v\n", err)
+		return
+	}
+	parseOpts, queryOpts := metalinkCLIOptions(opts)
+	doc, err := metalink.ParseWithOptions(bytes.NewReader(data), parseOpts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aria2go: cannot parse metalink file: %v\n", err)
+		return
+	}
+	doc = metalink.Query(doc, queryOpts)
+	printMetalinkFileInfo(os.Stdout, doc)
 }
 
 func printTorrentFileInfo(w io.Writer, meta *torrent.MetaInfo) {
@@ -1008,6 +1077,56 @@ func printTorrentFileInfo(w io.Writer, meta *torrent.MetaInfo) {
 		fmt.Fprintf(w, "   |%s (%s)\n", torrentDisplaySize(file.length), formatCommaInt(file.length))
 		io.WriteString(w, "---+---------------------------------------------------------------------------\n")
 	}
+}
+
+func printMetalinkFileInfo(w io.Writer, doc *metalink.Doc) {
+	io.WriteString(w, "Files:\n")
+	io.WriteString(w, "idx|path/length\n")
+	io.WriteString(w, "===+===========================================================================\n")
+	for i, file := range doc.Files {
+		fmt.Fprintf(w, "%3d|%s\n", i+1, file.Name)
+		fmt.Fprintf(w, "   |%s (%s)\n", metalinkDisplaySize(file.Size), formatCommaInt(file.Size))
+		io.WriteString(w, "---+---------------------------------------------------------------------------\n")
+	}
+	io.WriteString(w, "\n")
+}
+
+func metalinkCLIOptions(opts *config.Options) (metalink.ParseOptions, metalink.QueryOptions) {
+	parseOpts := metalink.ParseOptions{}
+	queryOpts := metalink.QueryOptions{}
+	if opts == nil {
+		return parseOpts, queryOpts
+	}
+	parseOpts.BaseURI = opts.MetalinkBaseURI
+	queryOpts.Version = opts.MetalinkVersion
+	queryOpts.Language = opts.MetalinkLanguage
+	queryOpts.OS = opts.MetalinkOS
+	return parseOpts, queryOpts
+}
+
+func metalinkDisplaySize(size int64) string {
+	if size < 0 {
+		return "0B"
+	}
+	units := []string{"", "Ki", "Mi", "Gi"}
+	t := size
+	unitIdx := 0
+	remainder := int64(0)
+	for t >= 1024 && unitIdx+1 < len(units) {
+		remainder = t % 1024
+		t /= 1024
+		unitIdx++
+	}
+	if unitIdx+1 < len(units) && t >= 922 {
+		unitIdx++
+		remainder = t
+		t = 0
+	}
+	if t < 10 && unitIdx > 0 {
+		frac := (remainder * 10) / 1024
+		return fmt.Sprintf("%d.%d%sB", t, frac, units[unitIdx])
+	}
+	return formatCommaInt(t) + units[unitIdx] + "B"
 }
 
 func torrentAnnounceLines(meta *torrent.MetaInfo) []string {

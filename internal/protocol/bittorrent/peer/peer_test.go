@@ -342,6 +342,79 @@ func TestAcceptAllowsPlaintextWhenMSEOptional(t *testing.T) {
 	}
 }
 
+func TestAcceptAnyRejectsPlaintextWhenCryptoRequired(t *testing.T) {
+	cfg := testConfig()
+	cfg.Encrypt = mse.Require
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := AcceptAny(ctx, local, map[[20]byte]Config{cfg.InfoHash: cfg})
+		errCh <- err
+	}()
+
+	req := marshalHandshake(cfg.InfoHash, [20]byte{'P', 'L', 'A', 'I', 'N'}, cfg.Reserved)
+	if _, err := remote.Write(req[:]); err != nil {
+		t.Fatalf("write handshake: %v", err)
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("AcceptAny should reject plaintext when crypto is required")
+	}
+}
+
+func TestAcceptAnyMatchesEncryptedInfoHash(t *testing.T) {
+	cfgA := testConfig()
+	cfgA.Encrypt = mse.Require
+	cfgB := testConfig()
+	cfgB.InfoHash[0] ^= 0xff
+	cfgB.LocalPeerID = [20]byte{'B', 'P', 'E', 'E', 'R'}
+	cfgB.Encrypt = mse.Require
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var matched [20]byte
+	errCh := make(chan error, 1)
+	go func() {
+		conn, infoHash, err := AcceptAny(ctx, local, map[[20]byte]Config{
+			cfgA.InfoHash: cfgA,
+			cfgB.InfoHash: cfgB,
+		})
+		if err == nil {
+			matched = infoHash
+			_ = conn.Close()
+		}
+		errCh <- err
+	}()
+
+	encConn, _, _, err := mse.Initiate(remote, cfgB.InfoHash, mse.Require)
+	if err != nil {
+		t.Fatalf("Initiate: %v", err)
+	}
+	conn, err := dialHandshake(ctx, encConn, cfgB)
+	if err != nil {
+		t.Fatalf("dialHandshake: %v", err)
+	}
+	defer conn.Close()
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("AcceptAny: %v", err)
+	}
+	if matched != cfgB.InfoHash {
+		t.Fatal("AcceptAny matched the wrong infohash")
+	}
+}
+
 func TestDialAllowFallsBackToPlainWhenMSERejected(t *testing.T) {
 	cfg := testConfig()
 	cfg.Encrypt = mse.Allow

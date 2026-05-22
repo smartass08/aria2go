@@ -5,8 +5,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/smartass08/aria2go/internal/hash"
 )
@@ -20,6 +22,18 @@ const lowestPriority = 999999
 
 type Doc struct {
 	Files []File
+}
+
+type ParseOptions struct {
+	BaseURI string
+}
+
+type QueryOptions struct {
+	Version           string
+	Language          string
+	OS                string
+	Locations         []string
+	PreferredProtocol string
 }
 
 type File struct {
@@ -44,6 +58,10 @@ type URLEntry struct {
 }
 
 func Parse(r io.Reader) (*Doc, error) {
+	return ParseWithOptions(r, ParseOptions{})
+}
+
+func ParseWithOptions(r io.Reader, opts ParseOptions) (*Doc, error) {
 	dec := xml.NewDecoder(r)
 
 	tok, err := nextStartElement(dec)
@@ -56,15 +74,19 @@ func Parse(r io.Reader) (*Doc, error) {
 
 	switch tok.Name.Space {
 	case nsV4:
-		return parseV4(dec, tok)
+		return parseV4(dec, tok, opts.BaseURI)
 	case nsV3:
-		return parseV3(dec, tok)
+		return parseV3(dec, tok, opts.BaseURI)
 	default:
 		return nil, fmt.Errorf("metalink: unsupported namespace %q", tok.Name.Space)
 	}
 }
 
 func ParseV4(r io.Reader) (*Doc, error) {
+	return ParseV4WithOptions(r, ParseOptions{})
+}
+
+func ParseV4WithOptions(r io.Reader, opts ParseOptions) (*Doc, error) {
 	dec := xml.NewDecoder(r)
 	tok, err := nextStartElement(dec)
 	if err != nil {
@@ -73,10 +95,10 @@ func ParseV4(r io.Reader) (*Doc, error) {
 	if tok.Name.Local != "metalink" || tok.Name.Space != nsV4 {
 		return nil, fmt.Errorf("metalink: expected v4 namespace, got %q", tok.Name.Space)
 	}
-	return parseV4(dec, tok)
+	return parseV4(dec, tok, opts.BaseURI)
 }
 
-func parseV4(dec *xml.Decoder, root xml.StartElement) (*Doc, error) {
+func parseV4(dec *xml.Decoder, root xml.StartElement, baseURI string) (*Doc, error) {
 	doc := &Doc{}
 
 	for {
@@ -94,7 +116,7 @@ func parseV4(dec *xml.Decoder, root xml.StartElement) (*Doc, error) {
 		}
 
 		if se.Name.Local == "file" && se.Name.Space == nsV4 {
-			f, ok := parseFileV4(dec, se)
+			f, ok := parseFileV4(dec, se, baseURI)
 			if ok {
 				doc.Files = append(doc.Files, f)
 			}
@@ -107,7 +129,7 @@ func parseV4(dec *xml.Decoder, root xml.StartElement) (*Doc, error) {
 	return doc, nil
 }
 
-func parseFileV4(dec *xml.Decoder, se xml.StartElement) (File, bool) {
+func parseFileV4(dec *xml.Decoder, se xml.StartElement, baseURI string) (File, bool) {
 	f := File{
 		Hashes: make(map[hash.Kind][]byte, 2),
 	}
@@ -146,7 +168,7 @@ func parseFileV4(dec *xml.Decoder, se xml.StartElement) (File, bool) {
 				}
 
 			case "url":
-				u, ok := parseURLV4(dec, t)
+				u, ok := parseURLV4(dec, t, baseURI)
 				if ok {
 					f.URLs = append(f.URLs, u)
 				}
@@ -196,7 +218,7 @@ func parseFileV4(dec *xml.Decoder, se xml.StartElement) (File, bool) {
 	}
 }
 
-func parseURLV4(dec *xml.Decoder, se xml.StartElement) (URLEntry, bool) {
+func parseURLV4(dec *xml.Decoder, se xml.StartElement, baseURI string) (URLEntry, bool) {
 	u := URLEntry{
 		Priority: lowestPriority,
 	}
@@ -215,6 +237,7 @@ func parseURLV4(dec *xml.Decoder, se xml.StartElement) (URLEntry, bool) {
 	if err := dec.DecodeElement(&u.URL, &se); err != nil {
 		u.URL = ""
 	}
+	u.URL = resolveURL(baseURI, u.URL)
 
 	u.Type = detectScheme(u.URL)
 
@@ -283,7 +306,7 @@ func parsePiecesV4(dec *xml.Decoder, se xml.StartElement) piecesResult {
 	}
 }
 
-func parseV3(dec *xml.Decoder, root xml.StartElement) (*Doc, error) {
+func parseV3(dec *xml.Decoder, root xml.StartElement, baseURI string) (*Doc, error) {
 	doc := &Doc{}
 
 	for {
@@ -301,7 +324,7 @@ func parseV3(dec *xml.Decoder, root xml.StartElement) (*Doc, error) {
 		}
 
 		if se.Name.Local == "files" && se.Name.Space == nsV3 {
-			parseFilesV3(dec, se, doc)
+			parseFilesV3(dec, se, doc, baseURI)
 			continue
 		}
 
@@ -311,7 +334,7 @@ func parseV3(dec *xml.Decoder, root xml.StartElement) (*Doc, error) {
 	return doc, nil
 }
 
-func parseFilesV3(dec *xml.Decoder, se xml.StartElement, doc *Doc) {
+func parseFilesV3(dec *xml.Decoder, se xml.StartElement, doc *Doc, baseURI string) {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -326,7 +349,7 @@ func parseFilesV3(dec *xml.Decoder, se xml.StartElement, doc *Doc) {
 
 		case xml.StartElement:
 			if t.Name.Local == "file" && t.Name.Space == nsV3 {
-				f, ok := parseFileV3(dec, t)
+				f, ok := parseFileV3(dec, t, baseURI)
 				if ok {
 					doc.Files = append(doc.Files, f)
 				}
@@ -337,7 +360,7 @@ func parseFilesV3(dec *xml.Decoder, se xml.StartElement, doc *Doc) {
 	}
 }
 
-func parseFileV3(dec *xml.Decoder, se xml.StartElement) (File, bool) {
+func parseFileV3(dec *xml.Decoder, se xml.StartElement, baseURI string) (File, bool) {
 	f := File{
 		Hashes: make(map[hash.Kind][]byte, 2),
 	}
@@ -394,7 +417,7 @@ func parseFileV3(dec *xml.Decoder, se xml.StartElement) (File, bool) {
 				}
 
 			case "resources":
-				parseResourcesV3(dec, t, &f)
+				parseResourcesV3(dec, t, &f, baseURI)
 
 			case "verification":
 				parseVerificationV3(dec, t, &f)
@@ -406,7 +429,7 @@ func parseFileV3(dec *xml.Decoder, se xml.StartElement) (File, bool) {
 	}
 }
 
-func parseResourcesV3(dec *xml.Decoder, se xml.StartElement, f *File) {
+func parseResourcesV3(dec *xml.Decoder, se xml.StartElement, f *File, baseURI string) {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -421,7 +444,7 @@ func parseResourcesV3(dec *xml.Decoder, se xml.StartElement, f *File) {
 
 		case xml.StartElement:
 			if t.Name.Local == "url" && t.Name.Space == nsV3 {
-				u, ok := parseURLV3(dec, t)
+				u, ok := parseURLV3(dec, t, baseURI)
 				if ok {
 					f.URLs = append(f.URLs, u)
 				}
@@ -432,7 +455,7 @@ func parseResourcesV3(dec *xml.Decoder, se xml.StartElement, f *File) {
 	}
 }
 
-func parseURLV3(dec *xml.Decoder, se xml.StartElement) (URLEntry, bool) {
+func parseURLV3(dec *xml.Decoder, se xml.StartElement, baseURI string) (URLEntry, bool) {
 	u := URLEntry{
 		Priority: lowestPriority,
 	}
@@ -455,6 +478,7 @@ func parseURLV3(dec *xml.Decoder, se xml.StartElement) (URLEntry, bool) {
 	if err := dec.DecodeElement(&u.URL, &se); err != nil {
 		u.URL = ""
 	}
+	u.URL = resolveURL(baseURI, u.URL)
 
 	return u, true
 }
@@ -685,4 +709,135 @@ func trimSpace(s string) string {
 		end--
 	}
 	return s[start:end]
+}
+
+func Query(doc *Doc, opts QueryOptions) *Doc {
+	if doc == nil {
+		return nil
+	}
+
+	filtered := &Doc{Files: make([]File, 0, len(doc.Files))}
+	for _, f := range doc.Files {
+		if opts.Version != "" && f.Version != opts.Version {
+			continue
+		}
+		if opts.Language != "" && !containsString(f.Languages, opts.Language) {
+			continue
+		}
+		if opts.OS != "" && !containsString(f.OSes, opts.OS) {
+			continue
+		}
+		filtered.Files = append(filtered.Files, cloneFile(f))
+	}
+	return filtered
+}
+
+func OrderURLs(urls []URLEntry, opts QueryOptions) []URLEntry {
+	if len(urls) == 0 {
+		return nil
+	}
+
+	ordered := append([]URLEntry(nil), urls...)
+	locations := normalizeLocations(opts.Locations)
+	preferred := trimSpace(opts.PreferredProtocol)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return adjustedPriority(ordered[i], locations, preferred) < adjustedPriority(ordered[j], locations, preferred)
+	})
+	return ordered
+}
+
+func StrongestHash(hashes map[hash.Kind][]byte) (hash.Kind, []byte, bool) {
+	var (
+		bestKind   hash.Kind
+		bestDigest []byte
+	)
+	for kind, digest := range hashes {
+		if !strongerHashKind(kind, bestKind) {
+			continue
+		}
+		bestKind = kind
+		bestDigest = append(bestDigest[:0], digest...)
+	}
+	if bestKind == "" {
+		return "", nil, false
+	}
+	return bestKind, bestDigest, true
+}
+
+func resolveURL(baseURI, raw string) string {
+	raw = trimSpace(raw)
+	if raw == "" || baseURI == "" {
+		return raw
+	}
+
+	base, err := url.Parse(baseURI)
+	if err != nil || !base.IsAbs() {
+		return raw
+	}
+	ref, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return base.ResolveReference(ref).String()
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneFile(src File) File {
+	dst := src
+	dst.URLs = append([]URLEntry(nil), src.URLs...)
+	if len(src.Hashes) > 0 {
+		dst.Hashes = make(map[hash.Kind][]byte, len(src.Hashes))
+		for kind, digest := range src.Hashes {
+			dst.Hashes[kind] = append([]byte(nil), digest...)
+		}
+	}
+	dst.Pieces = clonePieces(src.Pieces)
+	dst.Languages = append([]string(nil), src.Languages...)
+	dst.OSes = append([]string(nil), src.OSes...)
+	return dst
+}
+
+func clonePieces(src [][]byte) [][]byte {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([][]byte, len(src))
+	for i := range src {
+		dst[i] = append([]byte(nil), src[i]...)
+	}
+	return dst
+}
+
+func normalizeLocations(locations []string) []string {
+	if len(locations) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(locations))
+	for _, location := range locations {
+		location = strings.ToLower(trimSpace(location))
+		if location == "" {
+			continue
+		}
+		normalized = append(normalized, location)
+	}
+	return normalized
+}
+
+func adjustedPriority(entry URLEntry, locations []string, preferred string) int {
+	priority := entry.Priority
+	if len(locations) > 0 && containsString(locations, strings.ToLower(entry.Location)) {
+		priority -= lowestPriority
+	}
+	if preferred != "" && preferred != "none" && strings.EqualFold(entry.Type, preferred) {
+		priority -= lowestPriority
+	}
+	return priority
 }

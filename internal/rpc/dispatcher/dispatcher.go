@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,44 +63,44 @@ var eventToNotification = map[core.EventKind]string{
 // dispatchFunc is the signature for RPC method handlers.
 type dispatchFunc func(d *Dispatcher, ctx context.Context, params []interface{}) (interface{}, error)
 
-// methodNames list, matching aria2 1.37.0 (alphabetical).
+// methodNames list, matching aria2 1.37.0 RpcMethodFactory order.
 var methodNames = []string{
-	"aria2.addMetalink",
-	"aria2.addTorrent",
 	"aria2.addUri",
-	"aria2.changeGlobalOption",
-	"aria2.changeOption",
-	"aria2.changePosition",
-	"aria2.changeUri",
-	"aria2.forcePause",
-	"aria2.forcePauseAll",
-	"aria2.forceRemove",
-	"aria2.forceShutdown",
-	"aria2.getFiles",
-	"aria2.getGlobalOption",
-	"aria2.getGlobalStat",
-	"aria2.getOption",
+	"aria2.addTorrent",
 	"aria2.getPeers",
-	"aria2.getServers",
-	"aria2.getSessionInfo",
-	"aria2.getUris",
-	"aria2.getVersion",
-	"aria2.pause",
-	"aria2.pauseAll",
-	"aria2.purgeDownloadResult",
+	"aria2.addMetalink",
 	"aria2.remove",
-	"aria2.removeDownloadResult",
-	"aria2.saveSession",
-	"aria2.shutdown",
-	"aria2.tellActive",
-	"aria2.tellStopped",
-	"aria2.tellStatus",
-	"aria2.tellWaiting",
+	"aria2.pause",
+	"aria2.forcePause",
+	"aria2.pauseAll",
+	"aria2.forcePauseAll",
 	"aria2.unpause",
 	"aria2.unpauseAll",
+	"aria2.forceRemove",
+	"aria2.changePosition",
+	"aria2.tellStatus",
+	"aria2.getUris",
+	"aria2.getFiles",
+	"aria2.getServers",
+	"aria2.tellActive",
+	"aria2.tellWaiting",
+	"aria2.tellStopped",
+	"aria2.getOption",
+	"aria2.changeUri",
+	"aria2.changeOption",
+	"aria2.getGlobalOption",
+	"aria2.changeGlobalOption",
+	"aria2.purgeDownloadResult",
+	"aria2.removeDownloadResult",
+	"aria2.getVersion",
+	"aria2.getSessionInfo",
+	"aria2.shutdown",
+	"aria2.forceShutdown",
+	"aria2.getGlobalStat",
+	"aria2.saveSession",
+	"system.multicall",
 	"system.listMethods",
 	"system.listNotifications",
-	"system.multicall",
 }
 
 // authlessMethods are methods that do not require a top-level RPC secret token.
@@ -294,6 +293,25 @@ func paramStringArray(params []interface{}, index int) ([]string, error) {
 	return result, nil
 }
 
+func paramStringArrayFiltered(params []interface{}, index int) ([]string, error) {
+	if index >= len(params) {
+		return nil, newMethodErr("parameter at %d is required but missing", index)
+	}
+	arr, ok := params[index].([]interface{})
+	if !ok {
+		return nil, newMethodErr("the parameter at %d has wrong type", index)
+	}
+	result := make([]string, 0, len(arr))
+	for _, elem := range arr {
+		s, ok := elem.(string)
+		if !ok {
+			continue
+		}
+		result = append(result, s)
+	}
+	return result, nil
+}
+
 func optStringArray(params []interface{}, index int) []string {
 	if index >= len(params) {
 		return nil
@@ -342,17 +360,21 @@ func gidString(g core.GID) string {
 	return g.Hex()
 }
 
+func gidNotFoundErr(gid core.GID) error {
+	return newMethodErr("GID %s is not found", gidString(gid))
+}
+
 // ---------------------------------------------------------------------------
 // Method implementations
 // ---------------------------------------------------------------------------
 
 func (d *Dispatcher) addUri(ctx context.Context, params []interface{}) (interface{}, error) {
-	uris, err := paramStringArray(params, 0)
+	uris, err := paramStringArrayFiltered(params, 0)
 	if err != nil {
 		return nil, err
 	}
 	if len(uris) == 0 {
-		return nil, newMethodErr("uris must not be empty")
+		return nil, newMethodErr("URI is not provided.")
 	}
 	optsMap := optMap(params, 1)
 	position, posGiven := optInt(params, 2)
@@ -361,7 +383,10 @@ func (d *Dispatcher) addUri(ctx context.Context, params []interface{}) (interfac
 	}
 	pos := int(position)
 
-	opts := mapToOptions(optsMap)
+	opts, err := mapToOptions(optsMap, allowAnyRPCOption)
+	if err != nil {
+		return nil, err
+	}
 
 	spec := engine.AddSpec{
 		URIs:        uris,
@@ -396,7 +421,10 @@ func (d *Dispatcher) addTorrent(ctx context.Context, params []interface{}) (inte
 	}
 	pos := int(position)
 
-	opts := mapToOptions(optsMap)
+	opts, err := mapToOptions(optsMap, allowAnyRPCOption)
+	if err != nil {
+		return nil, err
+	}
 	if opts == nil {
 		opts = &config.Options{}
 	}
@@ -409,9 +437,8 @@ func (d *Dispatcher) addTorrent(ctx context.Context, params []interface{}) (inte
 		torrentFile = filepath.Join(optsValue(opts, globalOpts, "dir"),
 			fmt.Sprintf("%x.torrent", hash))
 		if err := os.WriteFile(torrentFile, torrentBytes, 0644); err == nil {
-			if opts.TorrentFile == "" {
-				opts.TorrentFile = torrentFile
-			}
+			opts.TorrentFile = torrentFile
+			opts.MarkExplicit("torrent-file")
 		}
 	}
 
@@ -419,6 +446,7 @@ func (d *Dispatcher) addTorrent(ctx context.Context, params []interface{}) (inte
 		URIs:        uris,
 		Options:     opts,
 		Torrent:     torrentBytes,
+		MetadataURI: torrentFile,
 		Position:    pos,
 		PositionSet: posGiven,
 	}
@@ -452,7 +480,10 @@ func (d *Dispatcher) addMetalink(ctx context.Context, params []interface{}) (int
 	}
 	pos := int(position)
 
-	opts := mapToOptions(optsMap)
+	opts, err := mapToOptions(optsMap, allowAnyRPCOption)
+	if err != nil {
+		return nil, err
+	}
 	if opts == nil {
 		opts = &config.Options{}
 	}
@@ -464,23 +495,20 @@ func (d *Dispatcher) addMetalink(ctx context.Context, params []interface{}) (int
 		filename := filepath.Join(optsValue(opts, globalOpts, "dir"),
 			fmt.Sprintf("%x.meta4", hash))
 		if err := os.WriteFile(filename, metalinkBytes, 0644); err == nil {
-			if opts.MetalinkFile == "" {
-				opts.MetalinkFile = filename
-			}
+			opts.MetalinkFile = filename
+			opts.MarkExplicit("metalink-file")
 		}
 	}
 
-	spec := engine.AddSpec{
-		Options:     opts,
-		Metalink:    metalinkBytes,
-		Position:    pos,
-		PositionSet: posGiven,
-	}
-	gid, err := d.engine.Add(spec)
+	gids, err := d.engine.AddMetalink(metalinkBytes, opts, pos, posGiven)
 	if err != nil {
 		return nil, newMethodErr("%v", err)
 	}
-	return []string{gidString(gid)}, nil
+	result := make([]string, 0, len(gids))
+	for _, gid := range gids {
+		result = append(result, gidString(gid))
+	}
+	return result, nil
 }
 
 func decodeBase64Param(name, value string) ([]byte, error) {
@@ -632,7 +660,11 @@ func (d *Dispatcher) tellStatus(ctx context.Context, params []interface{}) (inte
 	}
 	keys := optStringArray(params, 1)
 
-	return d.engine.TellStatusKeys(gid, keys)
+	result, err := d.engine.TellStatusKeys(gid, keys)
+	if err != nil {
+		return nil, gidNotFoundErr(gid)
+	}
+	return result, nil
 }
 
 func (d *Dispatcher) tellActive(ctx context.Context, params []interface{}) (interface{}, error) {
@@ -648,6 +680,9 @@ func (d *Dispatcher) tellWaiting(ctx context.Context, params []interface{}) (int
 	num, err := paramInt(params, 1)
 	if err != nil {
 		return nil, err
+	}
+	if num < 0 {
+		return nil, newMethodErr("The integer parameter at 1 has invalid value: the value must be greater than or equal to 0.")
 	}
 	keys := optStringArray(params, 2)
 
@@ -666,6 +701,9 @@ func (d *Dispatcher) tellStopped(ctx context.Context, params []interface{}) (int
 	num, err := paramInt(params, 1)
 	if err != nil {
 		return nil, err
+	}
+	if num < 0 {
+		return nil, newMethodErr("The integer parameter at 1 has invalid value: the value must be greater than or equal to 0.")
 	}
 	keys := optStringArray(params, 2)
 
@@ -726,16 +764,21 @@ func (d *Dispatcher) getUris(ctx context.Context, params []interface{}) (interfa
 	}
 	status, err := d.engine.TellStatus(gid)
 	if err != nil {
-		return nil, newMethodErr("%v", err)
+		return nil, newMethodErr("No URI data is available for GID#%s", gidString(gid))
+	}
+	if isTerminalStatus(status.Status) {
+		return nil, newMethodErr("No URI data is available for GID#%s", gidString(gid))
 	}
 
-	var uris []map[string]interface{}
-	for _, f := range status.Files {
-		for _, u := range f.URIs {
-			uris = append(uris, map[string]interface{}{
-				"uri":    u.URI,
-				"status": u.Status,
-			})
+	if len(status.Files) == 0 {
+		return []map[string]interface{}{}, nil
+	}
+	file := status.Files[0]
+	uris := make([]map[string]interface{}, len(file.URIs))
+	for i, u := range file.URIs {
+		uris[i] = map[string]interface{}{
+			"uri":    u.URI,
+			"status": u.Status,
 		}
 	}
 	return uris, nil
@@ -752,7 +795,7 @@ func (d *Dispatcher) getFiles(ctx context.Context, params []interface{}) (interf
 	}
 	status, err := d.engine.TellStatus(gid)
 	if err != nil {
-		return nil, newMethodErr("%v", err)
+		return nil, newMethodErr("No file data is available for GID#%s", gidString(gid))
 	}
 
 	var files []map[string]interface{}
@@ -786,12 +829,28 @@ func (d *Dispatcher) getPeers(ctx context.Context, params []interface{}) (interf
 	if err != nil {
 		return nil, newMethodErr("invalid GID: %v", err)
 	}
-	status, err := d.engine.TellStatus(gid)
-	if err != nil || isTerminalStatus(status.Status) {
+	peers, err := d.engine.GetPeers(gid)
+	if err != nil {
+		if _, statusErr := d.engine.TellStatus(gid); statusErr != nil {
+			return nil, newMethodErr("GID %s is not found", gidString(gid))
+		}
 		return nil, newMethodErr("No peer data is available for GID#%s", gidString(gid))
 	}
-	// Non-BitTorrent downloads have no peer storage in aria2 and return [].
-	return []interface{}{}, nil
+	result := make([]interface{}, 0, len(peers))
+	for _, peer := range peers {
+		result = append(result, map[string]interface{}{
+			"peerId":        peer.PeerID,
+			"ip":            peer.IP,
+			"port":          peer.Port,
+			"bitfield":      peer.Bitfield,
+			"amChoking":     boolStr(peer.AmChoking),
+			"peerChoking":   boolStr(peer.PeerChoking),
+			"downloadSpeed": fmt.Sprintf("%d", peer.DownloadSpeed),
+			"uploadSpeed":   fmt.Sprintf("%d", peer.UploadSpeed),
+			"seeder":        boolStr(peer.Seeder),
+		})
+	}
+	return result, nil
 }
 
 func (d *Dispatcher) getServers(ctx context.Context, params []interface{}) (interface{}, error) {
@@ -805,7 +864,7 @@ func (d *Dispatcher) getServers(ctx context.Context, params []interface{}) (inte
 	}
 	status, err := d.engine.TellStatus(gid)
 	if err != nil {
-		return nil, newMethodErr("%v", err)
+		return nil, gidNotFoundErr(gid)
 	}
 	if status.Status != core.StatusActive {
 		return nil, newMethodErr("No active download for GID#%s", gidString(gid))
@@ -815,13 +874,12 @@ func (d *Dispatcher) getServers(ctx context.Context, params []interface{}) (inte
 	for _, f := range status.Files {
 		servers := make([]interface{}, 0, len(f.URIs))
 		for _, u := range f.URIs {
-			currentURI := ""
-			if u.Status == "used" {
-				currentURI = u.URI
+			if u.Status != "used" {
+				continue
 			}
 			servers = append(servers, map[string]interface{}{
 				"uri":           u.URI,
-				"currentUri":    currentURI,
+				"currentUri":    u.URI,
 				"downloadSpeed": fmt.Sprintf("%d", status.DownloadSpeed),
 			})
 		}
@@ -853,6 +911,9 @@ func (d *Dispatcher) getOption(ctx context.Context, params []interface{}) (inter
 	}
 	opts, err := d.engine.GetOption(gid)
 	if err != nil {
+		if _, statusErr := d.engine.TellStatus(gid); statusErr != nil {
+			return nil, gidNotFoundErr(gid)
+		}
 		return nil, newMethodErr("%v", err)
 	}
 	return downloadOptionsToMap(opts), nil
@@ -867,11 +928,21 @@ func (d *Dispatcher) changeOption(ctx context.Context, params []interface{}) (in
 	if err != nil {
 		return nil, newMethodErr("invalid GID: %v", err)
 	}
+	status, err := d.engine.TellStatus(gid)
+	if err != nil {
+		return nil, newMethodErr("Cannot change option for GID#%s", gidString(gid))
+	}
+	if isTerminalStatus(status.Status) {
+		return nil, newMethodErr("Cannot change option for GID#%s", gidString(gid))
+	}
 	optsMap, err := paramMap(params, 1)
 	if err != nil {
 		return nil, err
 	}
-	opts := mapToOptions(optsMap)
+	opts, err := mapToOptions(optsMap, allowChangeRPCOption)
+	if err != nil {
+		return nil, err
+	}
 	if err := d.engine.ChangeOption(gid, opts); err != nil {
 		return nil, newMethodErr("%v", err)
 	}
@@ -891,7 +962,10 @@ func (d *Dispatcher) changeGlobalOption(ctx context.Context, params []interface{
 	if err != nil {
 		return nil, err
 	}
-	opts := mapToOptions(optsMap)
+	opts, err := mapToOptions(optsMap, allowChangeGlobalRPCOption)
+	if err != nil {
+		return nil, err
+	}
 	if err := d.engine.ChangeGlobalOption(opts); err != nil {
 		return nil, newMethodErr("%v", err)
 	}
@@ -944,11 +1018,11 @@ func (d *Dispatcher) changeUri(ctx context.Context, params []interface{}) (inter
 	if fileIndex < 1 {
 		return nil, newMethodErr("The integer parameter at 1 has invalid value: the value must be greater than or equal to 1.")
 	}
-	delURIs, err := paramStringArray(params, 2)
+	delURIs, err := paramStringArrayFiltered(params, 2)
 	if err != nil {
 		return nil, err
 	}
-	addURIs, err := paramStringArray(params, 3)
+	addURIs, err := paramStringArrayFiltered(params, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -1183,27 +1257,18 @@ func init() {
 	}
 }
 
-// mapToOptions converts a map[string]interface{} from RPC params to config.Options.
-func mapToOptions(m map[string]interface{}) *config.Options {
-	if m == nil {
-		return nil
+// mapToOptions converts an RPC option map into config.Options using the
+// same type acceptance rules as aria2: string values are parsed, cumulative
+// options may take string arrays, and unknown/wrongly-typed entries are ignored.
+func mapToOptions(m map[string]interface{}, allow func(string) bool) (*config.Options, error) {
+	opts, err := config.ParseRPCOptions(m, allow)
+	if err == nil {
+		return opts, nil
 	}
-	opts := &config.Options{}
-	v := reflect.ValueOf(opts).Elem()
-	for _, fi := range optFields {
-		raw, ok := m[fi.jsonTag]
-		if !ok {
-			continue
-		}
-		s, ok := raw.(string)
-		if !ok {
-			continue
-		}
-		f := v.Field(fi.index)
-		setFieldByKind(f, fi.kind, s)
-		opts.MarkExplicit(fi.jsonTag)
+	if optErr, ok := err.(*config.RPCOptionError); ok {
+		return nil, newMethodErr("We encountered a problem while processing the option '--%s'.", optErr.Name)
 	}
-	return opts
+	return nil, newMethodErr("%v", err)
 }
 
 func setFieldByKind(f reflect.Value, kind reflect.Kind, val string) {
@@ -1223,6 +1288,33 @@ func setFieldByKind(f reflect.Value, kind reflect.Kind, val string) {
 			f.Set(reflect.Append(f, reflect.ValueOf(val)))
 		}
 	}
+}
+
+func allowAnyRPCOption(name string) bool {
+	_, ok := optFieldByName[name]
+	return ok
+}
+
+func allowChangeRPCOption(name string) bool {
+	if !allowAnyRPCOption(name) {
+		return false
+	}
+	switch name {
+	case "gid", "metalink-file", "pause", "torrent-file":
+		return false
+	default:
+		return true
+	}
+}
+
+func allowChangeGlobalRPCOption(name string) bool {
+	if !allowAnyRPCOption(name) {
+		return false
+	}
+	if globalExcludedOption[name] || requestOnlyOption[name] {
+		return false
+	}
+	return name != "pause"
 }
 
 // hiddenOption is the set of aria2 options that exist internally
@@ -1760,11 +1852,8 @@ func (d *Dispatcher) OnEvent(ev core.Event) {
 // Ensure Dispatcher implements engine.Subscriber.
 var _ engine.Subscriber = (*Dispatcher)(nil)
 
-// Ensure method names are sorted for stable listMethods output.
-// Also pre-build the dispatch table for O(1) method lookups.
+// Pre-build the dispatch table for O(1) method lookups.
 func init() {
-	sort.Strings(methodNames)
-
 	dispatchTable = map[string]dispatchFunc{
 		"aria2.addUri":               (*Dispatcher).addUri,
 		"aria2.addTorrent":           (*Dispatcher).addTorrent,

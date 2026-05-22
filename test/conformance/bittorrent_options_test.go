@@ -91,6 +91,43 @@ func TestBitTorrent_SelectFileMultiFileParity(t *testing.T) {
 	)
 }
 
+func TestBitTorrent_RemoveUnselectedFileParity(t *testing.T) {
+	SkipIfNoRef(t)
+
+	files := btOptionFixtureFiles()
+	refBT := startProtocolBTMultiFileFixture(t, "bt-remove-unselected", files, 4*1024)
+	implBT := startProtocolBTMultiFileFixture(t, "bt-remove-unselected", files, 4*1024)
+
+	refDir := t.TempDir()
+	implDir := t.TempDir()
+	refTorrent := refBT.writeTorrentFile(t, refDir)
+	implTorrent := implBT.writeTorrentFile(t, implDir)
+
+	extra := []string{
+		"--select-file=2",
+		"--bt-remove-unselected-file=true",
+	}
+	ref := protocolRun(t, true, bittorrentOptionArgs(refDir, refTorrent, extra...))
+	impl := protocolRun(t, false, bittorrentOptionArgs(implDir, implTorrent, extra...))
+
+	AssertEqualExit(t, ref, impl)
+	protocolRequireExitZero(t, "ref remove-unselected", ref)
+	protocolRequireExitZero(t, "impl remove-unselected", impl)
+	protocolRequireFile(t, filepath.Join(refDir, "bt-remove-unselected", "beta.bin"), files[1].Data)
+	protocolRequireFile(t, filepath.Join(implDir, "bt-remove-unselected", "beta.bin"), files[1].Data)
+	for _, rel := range []string{
+		filepath.Join("bt-remove-unselected", "alpha.bin"),
+		filepath.Join("bt-remove-unselected", "gamma.bin"),
+	} {
+		if _, err := os.Stat(filepath.Join(refDir, rel)); !os.IsNotExist(err) {
+			t.Fatalf("ref expected %s to be removed, err=%v", rel, err)
+		}
+		if _, err := os.Stat(filepath.Join(implDir, rel)); !os.IsNotExist(err) {
+			t.Fatalf("impl expected %s to be removed, err=%v", rel, err)
+		}
+	}
+}
+
 func TestBitTorrent_IndexOutMultiFileParity(t *testing.T) {
 	SkipIfNoRef(t)
 

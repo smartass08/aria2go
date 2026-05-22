@@ -584,3 +584,67 @@ func TestValidateOptimizeConcurrentDownloadsInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateSummaryInterval(t *testing.T) {
+	tests := []struct {
+		value string
+		valid bool
+	}{
+		{value: "0", valid: true},
+		{value: "60", valid: true},
+		{value: "-1", valid: false},
+		{value: "nope", valid: false},
+	}
+	for _, tt := range tests {
+		o := Default()
+		o.SummaryInterval = tt.value
+		err := Validate(o)
+		if tt.valid && err != nil {
+			t.Fatalf("Validate summary-interval=%q: %v", tt.value, err)
+		}
+		if !tt.valid && err == nil {
+			t.Fatalf("Validate summary-interval=%q returned nil, want error", tt.value)
+		}
+	}
+}
+
+func TestValidateStartupIdleTime(t *testing.T) {
+	tests := []struct {
+		value string
+		valid bool
+	}{
+		{value: "1", valid: true},
+		{value: "10", valid: true},
+		{value: "60", valid: true},
+		{value: "0", valid: false},
+		{value: "61", valid: false},
+		{value: "nope", valid: false},
+	}
+	for _, tt := range tests {
+		o := Default()
+		o.StartupIdleTime = tt.value
+		err := Validate(o)
+		if tt.valid && err != nil {
+			t.Fatalf("Validate startup-idle-time=%q: %v", tt.value, err)
+		}
+		if !tt.valid && err == nil {
+			t.Fatalf("Validate startup-idle-time=%q returned nil, want error", tt.value)
+		}
+	}
+}
+
+func TestValidateEventPoll(t *testing.T) {
+	for _, value := range validEventPollValues() {
+		o := Default()
+		o.EventPoll = value
+		if err := Validate(o); err != nil {
+			t.Fatalf("Validate event-poll=%q: %v", value, err)
+		}
+	}
+
+	o := Default()
+	o.EventPoll = "bogus"
+	if err := Validate(o); err == nil {
+		t.Fatal("Validate event-poll=bogus returned nil, want error")
+	}
+}

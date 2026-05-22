@@ -6,6 +6,8 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -40,6 +42,68 @@ func newTestDispatcher(t *testing.T, cfg Config) (*Dispatcher, *engine.Engine) {
 		t.Fatalf("engine.New failed: %v", err)
 	}
 	return New(e, cfg), e
+}
+
+func runTestEngine(t *testing.T, e *engine.Engine) context.CancelFunc {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("engine.Run() error = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("engine.Run() did not return")
+		}
+	})
+	return cancel
+}
+
+func newBlockingDownloadServer(t *testing.T) (*httptest.Server, chan struct{}) {
+	t.Helper()
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1048576")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 1024))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	return srv, release
+}
+
+func waitForDispatcherStatus(t *testing.T, d *Dispatcher, gid, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		result, err := d.Call(context.Background(), "", "aria2.tellStatus", []interface{}{gid})
+		if err == nil {
+			status, ok := result.(map[string]interface{})
+			if ok && status["status"] == want {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for status %q for gid %s", want, gid)
 }
 
 func requireMulticallJSONFault(t *testing.T, elem interface{}, wantMessage string) {
@@ -141,6 +205,57 @@ func TestListMethods(t *testing.T) {
 	}
 	if !hasSystemListNotifications {
 		t.Error("ListMethods missing system.listNotifications")
+	}
+}
+
+func TestListMethods_SourceOrder(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	got := d.ListMethods()
+	want := []string{
+		"aria2.addUri",
+		"aria2.addTorrent",
+		"aria2.getPeers",
+		"aria2.addMetalink",
+		"aria2.remove",
+		"aria2.pause",
+		"aria2.forcePause",
+		"aria2.pauseAll",
+		"aria2.forcePauseAll",
+		"aria2.unpause",
+		"aria2.unpauseAll",
+		"aria2.forceRemove",
+		"aria2.changePosition",
+		"aria2.tellStatus",
+		"aria2.getUris",
+		"aria2.getFiles",
+		"aria2.getServers",
+		"aria2.tellActive",
+		"aria2.tellWaiting",
+		"aria2.tellStopped",
+		"aria2.getOption",
+		"aria2.changeUri",
+		"aria2.changeOption",
+		"aria2.getGlobalOption",
+		"aria2.changeGlobalOption",
+		"aria2.purgeDownloadResult",
+		"aria2.removeDownloadResult",
+		"aria2.getVersion",
+		"aria2.getSessionInfo",
+		"aria2.shutdown",
+		"aria2.forceShutdown",
+		"aria2.getGlobalStat",
+		"aria2.saveSession",
+		"system.multicall",
+		"system.listMethods",
+		"system.listNotifications",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListMethods len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ListMethods[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
 	}
 }
 
@@ -386,6 +501,30 @@ func validMetalinkData(name string) []byte {
 </metalink>`)
 }
 
+func validMultiFileMetalinkData(names ...string) []byte {
+	var buf bytes.Buffer
+	buf.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	buf.WriteString(`<metalink xmlns="urn:ietf:params:xml:ns:metalink">` + "\n")
+	for _, name := range names {
+		buf.WriteString(`  <file name="` + name + `">` + "\n")
+		buf.WriteString(`    <size>12345</size>` + "\n")
+		buf.WriteString(`    <url priority="1">http://example.com/` + name + `</url>` + "\n")
+		buf.WriteString("  </file>\n")
+	}
+	buf.WriteString("</metalink>")
+	return buf.Bytes()
+}
+
+func testTorrentFixture(t *testing.T) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join("..", "..", "torrent", "testdata", "single.torrent"))
+	if err != nil {
+		t.Fatalf("read torrent fixture: %v", err)
+	}
+	return data
+}
+
 func TestAddTorrent_InvalidUploadedMetadataErrors(t *testing.T) {
 	d, _ := newTestDispatcher(t, Config{})
 	torrentData := []byte("dummy torrent data")
@@ -417,6 +556,113 @@ func TestAddMetalink(t *testing.T) {
 	}
 	if len(arr) == 0 {
 		t.Error("expected at least one GID from addMetalink")
+	}
+}
+
+func TestAddTorrent_SavedMetadataOverridesTorrentFileOption(t *testing.T) {
+	dir := t.TempDir()
+	opts := testOpts()
+	opts.Dir = dir
+	opts.SaveSession = filepath.Join(dir, "session.txt")
+	opts.RPCSaveUploadMetadata = true
+	e, err := engine.New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("engine.New failed: %v", err)
+	}
+	d := New(e, Config{})
+
+	torrentData := testTorrentFixture(t)
+	result, err := d.Call(context.Background(), "", "aria2.addTorrent", []interface{}{
+		ariabase64.Encode(torrentData),
+		nil,
+		map[string]interface{}{"torrent-file": filepath.Join(dir, "ignored.torrent")},
+	})
+	if err != nil {
+		t.Fatalf("addTorrent: %v", err)
+	}
+
+	if result.(string) == "" {
+		t.Fatal("empty gid")
+	}
+	if err := e.SaveSession(); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	sessionData, err := os.ReadFile(opts.SaveSession)
+	if err != nil {
+		t.Fatalf("read session file: %v", err)
+	}
+	hash := sha1.Sum(torrentData)
+	wantPath := filepath.Join(dir, fmt.Sprintf("%x.torrent", hash))
+	if !bytes.Contains(sessionData, []byte(wantPath)) {
+		t.Fatalf("session file %q does not contain saved torrent path %q", string(sessionData), wantPath)
+	}
+}
+
+func TestAddMetalink_SavedMetadataOverridesMetalinkFileOption(t *testing.T) {
+	dir := t.TempDir()
+	opts := testOpts()
+	opts.Dir = dir
+	opts.SaveSession = filepath.Join(dir, "session.txt")
+	opts.RPCSaveUploadMetadata = true
+	e, err := engine.New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("engine.New failed: %v", err)
+	}
+	d := New(e, Config{})
+
+	metalinkData := validMetalinkData("saved.meta4.bin")
+	result, err := d.Call(context.Background(), "", "aria2.addMetalink", []interface{}{
+		ariabase64.Encode(metalinkData),
+		map[string]interface{}{"metalink-file": filepath.Join(dir, "ignored.meta4")},
+	})
+	if err != nil {
+		t.Fatalf("addMetalink: %v", err)
+	}
+
+	gids := result.([]string)
+	if len(gids) != 1 {
+		t.Fatalf("len(gids) = %d, want 1", len(gids))
+	}
+	if err := e.SaveSession(); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	sessionData, err := os.ReadFile(opts.SaveSession)
+	if err != nil {
+		t.Fatalf("read session file: %v", err)
+	}
+	hash := sha1.Sum(metalinkData)
+	wantPath := filepath.Join(dir, fmt.Sprintf("%x.meta4", hash))
+	if !bytes.Contains(sessionData, []byte(wantPath)) {
+		t.Fatalf("session file %q does not contain saved metalink path %q", string(sessionData), wantPath)
+	}
+}
+
+func TestAddMetalink_MultiFileReturnsMultipleGIDs(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	metalinkData := validMultiFileMetalinkData("a.bin", "b.bin")
+	result, err := d.Call(context.Background(), "", "aria2.addMetalink", []interface{}{
+		ariabase64.Encode(metalinkData),
+		map[string]interface{}{"gid": "00000000000000ab"},
+	})
+	if err != nil {
+		t.Fatalf("addMetalink: %v", err)
+	}
+
+	gids, ok := result.([]string)
+	if !ok {
+		t.Fatalf("result type = %T, want []string", result)
+	}
+	if len(gids) != 2 {
+		t.Fatalf("len(gids) = %d, want 2", len(gids))
+	}
+	if gids[0] == "" || gids[1] == "" {
+		t.Fatalf("gids = %#v, want two non-empty gids", gids)
+	}
+	if gids[0] == "00000000000000ab" || gids[1] == "00000000000000ab" {
+		t.Fatalf("metalink should ignore requested gid, got %#v", gids)
+	}
+	if gids[1] == gids[0] {
+		t.Fatalf("second gid = %q, want distinct autogenerated gid", gids[1])
 	}
 }
 
@@ -603,6 +849,19 @@ func TestTellWaiting_NegativeOffset(t *testing.T) {
 	}
 }
 
+func TestTellWaiting_NegativeNumRejected(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	_, err := d.Call(context.Background(), "", "aria2.tellWaiting", []interface{}{
+		int64(0), int64(-1),
+	})
+	if err == nil {
+		t.Fatal("expected error for negative num")
+	}
+	if got, want := err.Error(), "The integer parameter at 1 has invalid value: the value must be greater than or equal to 0."; got != want {
+		t.Fatalf("tellWaiting error got %q want %q", got, want)
+	}
+}
+
 func TestTellStopped(t *testing.T) {
 	d, _ := newTestDispatcher(t, Config{})
 	result, err := d.Call(context.Background(), "", "aria2.tellStopped", []interface{}{
@@ -617,6 +876,19 @@ func TestTellStopped(t *testing.T) {
 	}
 	// Stopped queue may be empty.
 	_ = arr
+}
+
+func TestTellStopped_NegativeNumRejected(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	_, err := d.Call(context.Background(), "", "aria2.tellStopped", []interface{}{
+		int64(0), int64(-1),
+	})
+	if err == nil {
+		t.Fatal("expected error for negative num")
+	}
+	if got, want := err.Error(), "The integer parameter at 1 has invalid value: the value must be greater than or equal to 0."; got != want {
+		t.Fatalf("tellStopped error got %q want %q", got, want)
+	}
 }
 
 func TestGetUris(t *testing.T) {
@@ -688,6 +960,104 @@ func TestGetFiles(t *testing.T) {
 	}
 }
 
+func TestGetFiles_StoppedDownload(t *testing.T) {
+	d, e := newTestDispatcher(t, Config{})
+	runTestEngine(t, e)
+	srv, _ := newBlockingDownloadServer(t)
+	addResult, _ := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
+		[]interface{}{srv.URL + "/file.zip"},
+	})
+	gid := addResult.(string)
+	waitForDispatcherStatus(t, d, gid, "active")
+	if _, err := d.Call(context.Background(), "", "aria2.remove", []interface{}{gid}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	waitForDispatcherStatus(t, d, gid, "removed")
+
+	result, err := d.Call(context.Background(), "", "aria2.getFiles", []interface{}{gid})
+	if err != nil {
+		t.Fatalf("getFiles stopped: %v", err)
+	}
+	files, ok := result.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected []map[string]interface{}, got %T", result)
+	}
+	if len(files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(files))
+	}
+	if got := files[0]["path"]; got != "/tmp/aria2go-test/file.zip" {
+		t.Fatalf("stopped file path = %v, want /tmp/aria2go-test/file.zip", got)
+	}
+	uris, ok := files[0]["uris"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("stopped file uris type = %T, want []map[string]interface{}", files[0]["uris"])
+	}
+	if len(uris) != 1 {
+		t.Fatalf("len(stopped uris) = %d, want 1 (%v)", len(uris), uris)
+	}
+	if uris[0]["status"] != "used" {
+		t.Fatalf("stopped uri statuses = %v, want [used]", uris)
+	}
+}
+
+func TestGetUris_StoppedDownloadRejected(t *testing.T) {
+	d, e := newTestDispatcher(t, Config{})
+	runTestEngine(t, e)
+	srv, _ := newBlockingDownloadServer(t)
+	addResult, _ := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
+		[]interface{}{srv.URL + "/file.zip"},
+	})
+	gid := addResult.(string)
+	waitForDispatcherStatus(t, d, gid, "active")
+	if _, err := d.Call(context.Background(), "", "aria2.remove", []interface{}{gid}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	waitForDispatcherStatus(t, d, gid, "removed")
+
+	_, err := d.Call(context.Background(), "", "aria2.getUris", []interface{}{gid})
+	if err == nil {
+		t.Fatal("expected error for stopped getUris")
+	}
+	if got, want := err.Error(), fmt.Sprintf("No URI data is available for GID#%s", gid); got != want {
+		t.Fatalf("getUris stopped error got %q want %q", got, want)
+	}
+}
+
+func TestTellStatus_StoppedSnapshotIncludesFiles(t *testing.T) {
+	d, e := newTestDispatcher(t, Config{})
+	runTestEngine(t, e)
+	srv, _ := newBlockingDownloadServer(t)
+	addResult, _ := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
+		[]interface{}{srv.URL + "/file.zip"},
+	})
+	gid := addResult.(string)
+	waitForDispatcherStatus(t, d, gid, "active")
+	if _, err := d.Call(context.Background(), "", "aria2.remove", []interface{}{gid}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	waitForDispatcherStatus(t, d, gid, "removed")
+
+	result, err := d.Call(context.Background(), "", "aria2.tellStatus", []interface{}{gid})
+	if err != nil {
+		t.Fatalf("tellStatus stopped: %v", err)
+	}
+	status, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map[string]interface{}, got %T", result)
+	}
+	for _, key := range []string{"gid", "status", "errorCode", "errorMessage", "files", "dir", "uploadLength", "pieceLength", "numPieces"} {
+		if _, ok := status[key]; !ok {
+			t.Fatalf("stopped tellStatus missing %q: %#v", key, status)
+		}
+	}
+	if got := status["errorMessage"]; got != "" {
+		t.Fatalf("stopped tellStatus errorMessage = %v, want empty string", got)
+	}
+	if got := status["pieceLength"]; got != "1048576" {
+		t.Fatalf("stopped tellStatus pieceLength = %v, want 1048576", got)
+	}
+}
+
 func TestGetPeers(t *testing.T) {
 	d, _ := newTestDispatcher(t, Config{})
 	result, err := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
@@ -724,6 +1094,17 @@ func TestGetPeers(t *testing.T) {
 	}
 }
 
+func TestGetPeers_MissingGID(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	_, err := d.Call(context.Background(), "", "aria2.getPeers", []interface{}{"0000000000000bad"})
+	if err == nil {
+		t.Fatal("expected missing gid error")
+	}
+	if got, want := err.Error(), "GID 0000000000000bad is not found"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func TestGetServers(t *testing.T) {
 	d, _ := newTestDispatcher(t, Config{})
 	result, err := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
@@ -739,6 +1120,17 @@ func TestGetServers(t *testing.T) {
 	}
 	if got, want := err.Error(), fmt.Sprintf("No active download for GID#%s", gid); got != want {
 		t.Fatalf("getServers error got %q want %q", got, want)
+	}
+}
+
+func TestGetServers_MissingGID(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	_, err := d.Call(context.Background(), "", "aria2.getServers", []interface{}{"0000000000000bad"})
+	if err == nil {
+		t.Fatal("expected missing gid error")
+	}
+	if got, want := err.Error(), "GID 0000000000000bad is not found"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 
@@ -760,6 +1152,28 @@ func TestChangeOption(t *testing.T) {
 	}
 	if result != "OK" {
 		t.Errorf("changeOption returned %v, want OK", result)
+	}
+}
+
+func TestChangeOption_StoppedDownloadRejected(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	addResult, _ := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
+		[]interface{}{"http://example.com/file.zip"},
+	})
+	gid := addResult.(string)
+	if _, err := d.Call(context.Background(), "", "aria2.forceRemove", []interface{}{gid}); err != nil {
+		t.Fatalf("forceRemove: %v", err)
+	}
+
+	_, err := d.Call(context.Background(), "", "aria2.changeOption", []interface{}{
+		gid,
+		map[string]interface{}{"max-download-limit": "1M"},
+	})
+	if err == nil {
+		t.Fatal("expected error for stopped download")
+	}
+	if got, want := err.Error(), fmt.Sprintf("Cannot change option for GID#%s", gid); got != want {
+		t.Fatalf("changeOption error got %q want %q", got, want)
 	}
 }
 
@@ -860,6 +1274,64 @@ func TestChangeUri(t *testing.T) {
 	}
 }
 
+func TestAddUri_IgnoresNonStringElements(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	result, err := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
+		[]interface{}{"http://example.com/file.zip", int64(7), true, "http://mirror.example.com/file.zip"},
+	})
+	if err != nil {
+		t.Fatalf("addUri: %v", err)
+	}
+	gid := result.(string)
+
+	urisResult, err := d.Call(context.Background(), "", "aria2.getUris", []interface{}{gid})
+	if err != nil {
+		t.Fatalf("getUris: %v", err)
+	}
+	uris, ok := urisResult.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected []map[string]interface{}, got %T", urisResult)
+	}
+	if len(uris) != 2 {
+		t.Fatalf("len(uris) = %d, want 2", len(uris))
+	}
+}
+
+func TestChangeUri_IgnoresNonStringElements(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	result, err := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
+		[]interface{}{"http://example.com/file.zip", "http://backup.example.com/file.zip"},
+	})
+	if err != nil {
+		t.Fatalf("addUri: %v", err)
+	}
+	gid := result.(string)
+
+	uriResult, err := d.Call(context.Background(), "", "aria2.changeUri", []interface{}{
+		gid,
+		int64(1),
+		[]interface{}{"http://backup.example.com/file.zip", int64(9)},
+		[]interface{}{"http://mirror.example.com/file.zip", false, "http://cdn.example.com/file.zip"},
+		int64(0),
+	})
+	if err != nil {
+		t.Fatalf("changeUri: %v", err)
+	}
+	requireInt64Pair(t, uriResult, 1, 2)
+
+	urisResult, err := d.Call(context.Background(), "", "aria2.getUris", []interface{}{gid})
+	if err != nil {
+		t.Fatalf("getUris: %v", err)
+	}
+	uris, ok := urisResult.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected []map[string]interface{}, got %T", urisResult)
+	}
+	if len(uris) != 3 {
+		t.Fatalf("len(uris) = %d, want 3", len(uris))
+	}
+}
+
 func TestGetGlobalStat(t *testing.T) {
 	d, _ := newTestDispatcher(t, Config{})
 	result, err := d.Call(context.Background(), "", "aria2.getGlobalStat", []interface{}{})
@@ -890,9 +1362,10 @@ func TestPurgeDownloadResult(t *testing.T) {
 }
 
 func TestRemoveDownloadResult(t *testing.T) {
-	d, _ := newTestDispatcher(t, Config{})
+	d, e := newTestDispatcher(t, Config{})
+	runTestEngine(t, e)
 	addResult, err := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
-		[]interface{}{"http://example.com/file.zip"},
+		[]interface{}{"http://127.0.0.1:1/file.zip"},
 	})
 	if err != nil {
 		t.Fatalf("addUri: %v", err)
@@ -904,8 +1377,7 @@ func TestRemoveDownloadResult(t *testing.T) {
 		t.Fatal("expected error removing result for active/waiting download")
 	}
 
-	// Force-remove so it enters stopped queue.
-	d.Call(context.Background(), "", "aria2.forceRemove", []interface{}{gid})
+	waitForDispatcherStatus(t, d, gid, "error")
 
 	result, err := d.Call(context.Background(), "", "aria2.removeDownloadResult", []interface{}{gid})
 	if err != nil {
@@ -957,7 +1429,17 @@ func TestForceShutdown(t *testing.T) {
 }
 
 func TestSaveSession(t *testing.T) {
-	d, _ := newTestDispatcher(t, Config{})
+	path := filepath.Join(t.TempDir(), "session.txt")
+	e, err := engine.New(&config.Options{
+		Dir:                    "/tmp/aria2go-test",
+		MaxConcurrentDownloads: 5,
+		MaxDownloadResult:      100,
+		SaveSession:            path,
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	d := New(e, Config{})
 	result, err := d.Call(context.Background(), "", "aria2.saveSession", []interface{}{})
 	if err != nil {
 		t.Fatalf("saveSession: %v", err)
@@ -990,6 +1472,17 @@ func TestGetOption(t *testing.T) {
 	}
 	if _, ok := opts["enable-rpc"]; ok {
 		t.Fatal("getOption included global-only enable-rpc")
+	}
+}
+
+func TestGetOption_MissingGID(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	_, err := d.Call(context.Background(), "", "aria2.getOption", []interface{}{"0000000000000bad"})
+	if err == nil {
+		t.Fatal("expected missing gid error")
+	}
+	if got, want := err.Error(), "GID 0000000000000bad is not found"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 
@@ -1226,6 +1719,9 @@ func TestTellStatus_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for not-found GID")
 	}
+	if got, want := err.Error(), "GID ffffffffffffffff is not found"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
 }
 
 // ---- Notifications ----
@@ -1393,7 +1889,10 @@ func TestMapToOptions(t *testing.T) {
 		"max-concurrent-downloads": "5",
 		"max-download-limit":       "1M",
 	}
-	opts := mapToOptions(m)
+	opts, err := mapToOptions(m, allowAnyRPCOption)
+	if err != nil {
+		t.Fatalf("mapToOptions() error = %v", err)
+	}
 	if opts == nil {
 		t.Fatal("mapToOptions returned nil")
 	}
@@ -1405,6 +1904,19 @@ func TestMapToOptions(t *testing.T) {
 	}
 	if opts.MaxDownloadLimit != "1M" {
 		t.Errorf("MaxDownloadLimit = %q, want 1M", opts.MaxDownloadLimit)
+	}
+}
+
+func TestMapToOptions_AccumulativeArrayIgnoresNonStringElements(t *testing.T) {
+	m := map[string]interface{}{
+		"header": []interface{}{"X-One: 1", 2, false, "X-Two: 2"},
+	}
+	opts, err := mapToOptions(m, allowAnyRPCOption)
+	if err != nil {
+		t.Fatalf("mapToOptions() error = %v", err)
+	}
+	if got, want := opts.Header, []string{"X-One: 1", "X-Two: 2"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Header = %#v, want %#v", got, want)
 	}
 }
 
@@ -1500,8 +2012,11 @@ func TestAddUri_WithBadOption(t *testing.T) {
 			"max-concurrent-downloads": "not_a_number",
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for invalid option value")
+	}
+	if got, want := err.Error(), "We encountered a problem while processing the option '--max-concurrent-downloads'."; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 
@@ -1590,19 +2105,84 @@ func TestChangeOption_WithBadOption(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Logf("got error (expected): %v", err)
+		t.Fatalf("changeOption should ignore unknown options: %v", err)
 	}
 }
 
-func TestChangeGlobalOption_WithBadOption(t *testing.T) {
+func TestChangeOption_InvalidKnownOptionReturnsAria2Message(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	addResult, _ := d.Call(context.Background(), "", "aria2.addUri", []interface{}{
+		[]interface{}{"http://example.com/file.zip"},
+	})
+	gid := addResult.(string)
+
+	_, err := d.Call(context.Background(), "", "aria2.changeOption", []interface{}{
+		gid,
+		map[string]interface{}{"max-download-limit": "1Gibberish"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid option value")
+	}
+	if got, want := err.Error(), "We encountered a problem while processing the option '--max-download-limit'."; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestChangeGlobalOption_InvalidKnownOptionReturnsAria2Message(t *testing.T) {
 	d, _ := newTestDispatcher(t, Config{})
 	_, err := d.Call(context.Background(), "", "aria2.changeGlobalOption", []interface{}{
 		map[string]interface{}{
 			"max-concurrent-downloads": "not_a_number",
 		},
 	})
+	if err == nil {
+		t.Fatal("expected error for invalid option value")
+	}
+	if got, want := err.Error(), "We encountered a problem while processing the option '--max-concurrent-downloads'."; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestChangeGlobalOption_InvalidBooleanOptionReturnsAria2Message(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	_, err := d.Call(context.Background(), "", "aria2.changeGlobalOption", []interface{}{
+		map[string]interface{}{
+			"pause-metadata": "maybe",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid boolean option value")
+	}
+	if got, want := err.Error(), "We encountered a problem while processing the option '--pause-metadata'."; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestChangeGlobalOption_IgnoresRequestOnlyOptionsAndFiltersStringArrays(t *testing.T) {
+	d, _ := newTestDispatcher(t, Config{})
+	result, err := d.Call(context.Background(), "", "aria2.changeGlobalOption", []interface{}{
+		map[string]interface{}{
+			"out":    "ignored.bin",
+			"header": []interface{}{"X-Test: 1", 2, true},
+		},
+	})
 	if err != nil {
-		t.Logf("got error (expected): %v", err)
+		t.Fatalf("changeGlobalOption: %v", err)
+	}
+	if result != "OK" {
+		t.Fatalf("result = %v, want OK", result)
+	}
+
+	globalResult, err := d.Call(context.Background(), "", "aria2.getGlobalOption", []interface{}{})
+	if err != nil {
+		t.Fatalf("getGlobalOption: %v", err)
+	}
+	options := globalResult.(map[string]interface{})
+	if got := options["header"]; got != "X-Test: 1\n" {
+		t.Fatalf("header = %v, want %q", got, "X-Test: 1\n")
+	}
+	if _, ok := options["out"]; ok {
+		t.Fatalf("out unexpectedly present in global options: %#v", options)
 	}
 }
 

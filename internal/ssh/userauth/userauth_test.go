@@ -1,7 +1,9 @@
 package userauth
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"io"
@@ -281,6 +283,35 @@ func TestAuthenticatePublicKey_Ed25519(t *testing.T) {
 	client := NewClient(conn)
 	err = client.Authenticate(sessionID, []AuthMethod{
 		&PublicKeyAuth{Username: "eduser", Key: priv},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAuthenticatePublicKey_ECDSA(t *testing.T) {
+	conn := newMockTransport()
+
+	sessionID := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	alg, pubBlob, _, err := extractKey(key)
+	if err != nil {
+		t.Fatalf("extractKey: %v", err)
+	}
+	conn.queueResponse(buildPKOK(alg, pubBlob))
+	conn.queueResponse([]byte{SSH_MSG_USERAUTH_SUCCESS})
+
+	client := NewClient(conn)
+	err = client.Authenticate(sessionID, []AuthMethod{
+		&PublicKeyAuth{Username: "ecdsauser", Key: key},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -2,12 +2,16 @@ package conformance
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +60,376 @@ func TestDownload_HTTPRangeSplitParity(t *testing.T) {
 	requireDownloadedBytes(t, filepath.Join(implDir, "range.bin"), payload)
 	requireRangeRequested(t, "ref", refSrv.snapshot())
 	requireRangeRequested(t, "impl", implSrv.snapshot())
+}
+
+func TestDownload_HTTPChecksumParity(t *testing.T) {
+	SkipIfNoRef(t)
+
+	payload := bytes.Repeat([]byte("checksum parity payload\n"), 4096)
+	srv := newHTTPPayloadServer(t, payload)
+	defer srv.Close()
+
+	t.Run("matching checksum succeeds", func(t *testing.T) {
+		sum := sha1.Sum(payload)
+		extra := []string{"--checksum=sha-1=" + fmt.Sprintf("%x", sum)}
+
+		refDir, implDir := t.TempDir(), t.TempDir()
+		ref := runHTTPDownload(t, true, srv.URL+"/checksum.bin", refDir, "checksum.bin", extra)
+		impl := runHTTPDownload(t, false, srv.URL+"/checksum.bin", implDir, "checksum.bin", extra)
+
+		AssertEqualExit(t, ref, impl)
+		requireDownloadedBytes(t, filepath.Join(refDir, "checksum.bin"), payload)
+		requireDownloadedBytes(t, filepath.Join(implDir, "checksum.bin"), payload)
+	})
+
+	t.Run("mismatched checksum fails", func(t *testing.T) {
+		extra := []string{"--checksum=sha-1=" + strings.Repeat("0", 40)}
+
+		refDir, implDir := t.TempDir(), t.TempDir()
+		ref := runDownloadProcess(t, true, append(append(baseDownloadArgs(refDir, "bad-checksum.bin"), "--allow-overwrite=true"), append(extra, srv.URL+"/bad-checksum.bin")...), "")
+		impl := runDownloadProcess(t, false, append(append(baseDownloadArgs(implDir, "bad-checksum.bin"), "--allow-overwrite=true"), append(extra, srv.URL+"/bad-checksum.bin")...), "")
+
+		AssertEqualExit(t, ref, impl)
+		if ref.ExitCode == 0 || impl.ExitCode == 0 {
+			t.Fatalf("checksum mismatch should fail: ref=%d impl=%d", ref.ExitCode, impl.ExitCode)
+		}
+	})
+}
+
+func TestDownload_HTTPHashCheckOnlyWithoutMetadataParity(t *testing.T) {
+	SkipIfNoRef(t)
+
+	payload := bytes.Repeat([]byte("hash-check-only parity payload\n"), 1024)
+
+	t.Run("missing_file_reports_incomplete", func(t *testing.T) {
+		refSrv := newRecordingHTTPPayloadServer(t, payload)
+		defer refSrv.Close()
+		implSrv := newRecordingHTTPPayloadServer(t, payload)
+		defer implSrv.Close()
+
+		refDir, implDir := t.TempDir(), t.TempDir()
+		ref := runDownloadProcess(t, true, append(baseDownloadArgs(refDir, "hash-only.bin"),
+			"--allow-overwrite=true",
+			"--auto-file-renaming=false",
+			"--split=1",
+			"--hash-check-only=true",
+			refSrv.URL+"/hash-only.bin",
+		), "")
+		impl := runDownloadProcess(t, false, append(baseDownloadArgs(implDir, "hash-only.bin"),
+			"--allow-overwrite=true",
+			"--auto-file-renaming=false",
+			"--split=1",
+			"--hash-check-only=true",
+			implSrv.URL+"/hash-only.bin",
+		), "")
+
+		AssertEqualExit(t, ref, impl)
+		if ref.ExitCode != 1 || impl.ExitCode != 1 {
+			t.Fatalf("hash-check-only missing file should report incomplete: ref=%d impl=%d", ref.ExitCode, impl.ExitCode)
+		}
+		requireFileSize(t, filepath.Join(refDir, "hash-only.bin"), 0)
+		requireFileSize(t, filepath.Join(implDir, "hash-only.bin"), 0)
+		requireControlFileExists(t, filepath.Join(refDir, "hash-only.bin")+".aria2")
+		requireControlFileExists(t, filepath.Join(implDir, "hash-only.bin")+".aria2")
+	})
+
+	t.Run("partial_file_reports_incomplete_without_redownload", func(t *testing.T) {
+		refSrv := newRecordingHTTPPayloadServer(t, payload)
+		defer refSrv.Close()
+		implSrv := newRecordingHTTPPayloadServer(t, payload)
+		defer implSrv.Close()
+
+		const partial = 4096
+		refDir, implDir := t.TempDir(), t.TempDir()
+		for _, dir := range []string{refDir, implDir} {
+			if err := os.WriteFile(filepath.Join(dir, "hash-only.bin"), payload[:partial], 0o644); err != nil {
+				t.Fatalf("seed partial file: %v", err)
+			}
+		}
+
+		ref := runDownloadProcess(t, true, append(baseDownloadArgs(refDir, "hash-only.bin"),
+			"--continue=true",
+			"--allow-overwrite=false",
+			"--auto-file-renaming=false",
+			"--split=1",
+			"--hash-check-only=true",
+			refSrv.URL+"/hash-only.bin",
+		), "")
+		impl := runDownloadProcess(t, false, append(baseDownloadArgs(implDir, "hash-only.bin"),
+			"--continue=true",
+			"--allow-overwrite=false",
+			"--auto-file-renaming=false",
+			"--split=1",
+			"--hash-check-only=true",
+			implSrv.URL+"/hash-only.bin",
+		), "")
+
+		AssertEqualExit(t, ref, impl)
+		if ref.ExitCode != 1 || impl.ExitCode != 1 {
+			t.Fatalf("hash-check-only partial file should report incomplete: ref=%d impl=%d", ref.ExitCode, impl.ExitCode)
+		}
+		requireDownloadedBytes(t, filepath.Join(refDir, "hash-only.bin"), payload[:partial])
+		requireDownloadedBytes(t, filepath.Join(implDir, "hash-only.bin"), payload[:partial])
+		requireControlFileExists(t, filepath.Join(refDir, "hash-only.bin")+".aria2")
+		requireControlFileExists(t, filepath.Join(implDir, "hash-only.bin")+".aria2")
+		requireNoGetScratchRestart(t, "ref hash-check-only partial", refSrv.snapshot(), partial)
+		requireNoGetScratchRestart(t, "impl hash-check-only partial", implSrv.snapshot(), partial)
+	})
+
+	t.Run("complete_file_succeeds_with_continue", func(t *testing.T) {
+		refSrv := newRecordingHTTPPayloadServer(t, payload)
+		defer refSrv.Close()
+		implSrv := newRecordingHTTPPayloadServer(t, payload)
+		defer implSrv.Close()
+
+		refDir, implDir := t.TempDir(), t.TempDir()
+		for _, dir := range []string{refDir, implDir} {
+			if err := os.WriteFile(filepath.Join(dir, "hash-only.bin"), payload, 0o644); err != nil {
+				t.Fatalf("seed complete file: %v", err)
+			}
+		}
+
+		ref := runDownloadProcess(t, true, append(baseDownloadArgs(refDir, "hash-only.bin"),
+			"--continue=true",
+			"--allow-overwrite=false",
+			"--auto-file-renaming=false",
+			"--split=1",
+			"--hash-check-only=true",
+			refSrv.URL+"/hash-only.bin",
+		), "")
+		impl := runDownloadProcess(t, false, append(baseDownloadArgs(implDir, "hash-only.bin"),
+			"--continue=true",
+			"--allow-overwrite=false",
+			"--auto-file-renaming=false",
+			"--split=1",
+			"--hash-check-only=true",
+			implSrv.URL+"/hash-only.bin",
+		), "")
+
+		AssertEqualExit(t, ref, impl)
+		requireExitSuccess(t, "ref hash-check-only complete", ref)
+		requireExitSuccess(t, "impl hash-check-only complete", impl)
+		requireDownloadedBytes(t, filepath.Join(refDir, "hash-only.bin"), payload)
+		requireDownloadedBytes(t, filepath.Join(implDir, "hash-only.bin"), payload)
+	})
+}
+
+func TestDownload_HTTPDigestHeaderParity(t *testing.T) {
+	SkipIfNoRef(t)
+
+	payload := bytes.Repeat([]byte("digest parity payload\n"), 2048)
+	sum := sha1.Sum(payload)
+	goodDigest := "SHA-1=" + base64.StdEncoding.EncodeToString(sum[:])
+	badDigest := "SHA-1=" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, len(sum)))
+
+	for _, tt := range []struct {
+		name     string
+		digest   string
+		wantExit int
+		wantFile bool
+	}{
+		{name: "matching_digest_succeeds", digest: goodDigest, wantExit: 0, wantFile: true},
+		{name: "mismatched_digest_fails", digest: badDigest, wantExit: 32},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			newDigestServer := func(digest string) *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Want-Digest") == "" {
+						t.Errorf("missing Want-Digest header for %s", tt.name)
+					}
+					w.Header().Set("Accept-Ranges", "bytes")
+					w.Header().Set("Content-Type", "application/octet-stream")
+					w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+					w.Header().Set("Digest", digest)
+					if r.Method == http.MethodHead {
+						return
+					}
+					_, _ = w.Write(payload)
+				}))
+			}
+
+			refSrv := newDigestServer(tt.digest)
+			defer refSrv.Close()
+			implSrv := newDigestServer(tt.digest)
+			defer implSrv.Close()
+
+			refDir, implDir := t.TempDir(), t.TempDir()
+			ref := runDownloadProcess(t, true, append(baseDownloadArgs(refDir, "digest.bin"),
+				"--allow-overwrite=true",
+				"--auto-file-renaming=false",
+				refSrv.URL+"/digest.bin",
+			), "")
+			impl := runDownloadProcess(t, false, append(baseDownloadArgs(implDir, "digest.bin"),
+				"--allow-overwrite=true",
+				"--auto-file-renaming=false",
+				implSrv.URL+"/digest.bin",
+			), "")
+
+			AssertEqualExit(t, ref, impl)
+			if ref.ExitCode != tt.wantExit {
+				t.Fatalf("reference exit=%d, want %d\nstdout=%s\nstderr=%s", ref.ExitCode, tt.wantExit, ref.Stdout, ref.Stderr)
+			}
+			if impl.ExitCode != tt.wantExit {
+				t.Fatalf("implementation exit=%d, want %d\nstdout=%s\nstderr=%s", impl.ExitCode, tt.wantExit, impl.Stdout, impl.Stderr)
+			}
+			if tt.wantFile {
+				requireDownloadedBytes(t, filepath.Join(refDir, "digest.bin"), payload)
+				requireDownloadedBytes(t, filepath.Join(implDir, "digest.bin"), payload)
+			}
+		})
+	}
+}
+
+func TestDownload_HTTPLowestSpeedLimitParity(t *testing.T) {
+	SkipIfNoRef(t)
+
+	payload := bytes.Repeat([]byte("slow link parity payload\n"), 4096)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		if r.Method == http.MethodHead {
+			return
+		}
+		flusher, _ := w.(http.Flusher)
+		for start := 0; start < len(payload); start += 1024 {
+			end := start + 1024
+			if end > len(payload) {
+				end = len(payload)
+			}
+			_, _ = w.Write(payload[start:end])
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	extra := []string{
+		"--split=1",
+		"--lowest-speed-limit=8K",
+	}
+	refDir, implDir := t.TempDir(), t.TempDir()
+	ref := runDownloadProcess(t, true, append(append(baseDownloadArgs(refDir, "slow.bin"), "--allow-overwrite=true"), append(extra, srv.URL+"/slow.bin")...), "")
+	impl := runDownloadProcess(t, false, append(append(baseDownloadArgs(implDir, "slow.bin"), "--allow-overwrite=true"), append(extra, srv.URL+"/slow.bin")...), "")
+
+	AssertEqualExit(t, ref, impl)
+	if ref.ExitCode == 0 || impl.ExitCode == 0 {
+		t.Fatalf("lowest-speed-limit should fail slow transfer: ref=%d impl=%d", ref.ExitCode, impl.ExitCode)
+	}
+}
+
+func TestDownload_HTTPResumeFallbackUsesNextMirrorBeforeScratch(t *testing.T) {
+	SkipIfNoRef(t)
+
+	resumePayload := bytes.Repeat([]byte("0123456789abcdef"), 16*1024)
+	refPrimary := newRecordingHTTPPayloadServerWithOptions(t, resumePayload, httpPayloadOptions{ignoreRange: true})
+	defer refPrimary.Close()
+	refSecondary := newRecordingHTTPPayloadServer(t, resumePayload)
+	defer refSecondary.Close()
+	implPrimary := newRecordingHTTPPayloadServerWithOptions(t, resumePayload, httpPayloadOptions{ignoreRange: true})
+	defer implPrimary.Close()
+	implSecondary := newRecordingHTTPPayloadServer(t, resumePayload)
+	defer implSecondary.Close()
+
+	const partial = 32768
+	refDir, implDir := t.TempDir(), t.TempDir()
+	for _, dir := range []string{refDir, implDir} {
+		if err := os.WriteFile(filepath.Join(dir, "resume-mirror.bin"), resumePayload[:partial], 0o644); err != nil {
+			t.Fatalf("seed partial file: %v", err)
+		}
+	}
+	refInput := filepath.Join(refDir, "resume-mirror.txt")
+	implInput := filepath.Join(implDir, "resume-mirror.txt")
+	refEntry := strings.Join([]string{
+		refPrimary.URL + "/resume-mirror.bin\t" + refSecondary.URL + "/resume-mirror.bin",
+		"  dir=" + refDir,
+		"  out=resume-mirror.bin",
+		"  continue=true",
+		"  always-resume=false",
+		"  allow-overwrite=false",
+		"  auto-file-renaming=false",
+		"  disk-cache=0",
+		"  split=1",
+		"  uri-selector=inorder",
+		"  max-resume-failure-tries=2",
+		"",
+	}, "\n")
+	implEntry := strings.Join([]string{
+		implPrimary.URL + "/resume-mirror.bin\t" + implSecondary.URL + "/resume-mirror.bin",
+		"  dir=" + implDir,
+		"  out=resume-mirror.bin",
+		"  continue=true",
+		"  always-resume=false",
+		"  allow-overwrite=false",
+		"  auto-file-renaming=false",
+		"  disk-cache=0",
+		"  split=1",
+		"  uri-selector=inorder",
+		"  max-resume-failure-tries=2",
+		"",
+	}, "\n")
+	if err := os.WriteFile(refInput, []byte(refEntry), 0o644); err != nil {
+		t.Fatalf("write ref input file: %v", err)
+	}
+	if err := os.WriteFile(implInput, []byte(implEntry), 0o644); err != nil {
+		t.Fatalf("write impl input file: %v", err)
+	}
+
+	ref := runDownloadProcess(t, true, append(inputFileArgs(), "--input-file="+refInput), "")
+	impl := runDownloadProcess(t, false, append(inputFileArgs(), "--input-file="+implInput), "")
+
+	AssertEqualExit(t, ref, impl)
+	requireExitSuccess(t, "ref resume mirror", ref)
+	requireExitSuccess(t, "impl resume mirror", impl)
+	requireDownloadedBytes(t, filepath.Join(refDir, "resume-mirror.bin"), resumePayload)
+	requireDownloadedBytes(t, filepath.Join(implDir, "resume-mirror.bin"), resumePayload)
+	requireRangeStartingAt(t, "ref primary mirror", refPrimary.snapshot(), partial)
+	requireRangeStartingAt(t, "impl primary mirror", implPrimary.snapshot(), partial)
+	requireRangeStartingAt(t, "ref secondary mirror", refSecondary.snapshot(), partial)
+	requireRangeStartingAt(t, "impl secondary mirror", implSecondary.snapshot(), partial)
+	requireNoGetScratchRestart(t, "ref primary mirror", refPrimary.snapshot(), partial)
+	requireNoGetScratchRestart(t, "impl primary mirror", implPrimary.snapshot(), partial)
+}
+
+func TestDownload_BitTorrentCompleteHookParity(t *testing.T) {
+	SkipIfNoRef(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("hook script uses POSIX shell")
+	}
+	requireRefHelpOptions(t, "on-bt-download-complete", "seed-time")
+
+	payload := protocolPayload("bittorrent-complete-hook", 48*1024+777)
+	const (
+		name        = "bt-hook.bin"
+		pieceLength = 16 * 1024
+	)
+
+	refBT := startProtocolBTFixture(t, name, payload, pieceLength)
+	implBT := startProtocolBTFixture(t, name, payload, pieceLength)
+
+	refDir := t.TempDir()
+	implDir := t.TempDir()
+	refLog := filepath.Join(refDir, "hooks.log")
+	implLog := filepath.Join(implDir, "hooks.log")
+	refHook := writeHookScript(t, refDir, "bt-complete", refLog)
+	implHook := writeHookScript(t, implDir, "bt-complete", implLog)
+
+	refTorrent := refBT.writeTorrentFile(t, refDir)
+	implTorrent := implBT.writeTorrentFile(t, implDir)
+
+	ref := protocolRun(t, true, append(bittorrentDownloadArgs(refDir, refTorrent), "--on-bt-download-complete="+refHook))
+	impl := protocolRun(t, false, append(bittorrentDownloadArgs(implDir, implTorrent), "--on-bt-download-complete="+implHook))
+
+	AssertEqualExit(t, ref, impl)
+	protocolRequireExitZero(t, "ref bittorrent hook", ref)
+	protocolRequireExitZero(t, "impl bittorrent hook", impl)
+	protocolRequireFile(t, filepath.Join(refDir, name), payload)
+	protocolRequireFile(t, filepath.Join(implDir, name), payload)
+
+	requireHookEvent(t, waitHookEvents(t, refLog, "bt-complete")["bt-complete"], filepath.Join(refDir, name))
+	requireHookEvent(t, waitHookEvents(t, implLog, "bt-complete")["bt-complete"], filepath.Join(implDir, name))
 }
 
 func TestDownload_HTTPAuthAndHeaderParity(t *testing.T) {
@@ -114,6 +488,37 @@ func TestDownload_ResultHideSuppressesConsoleOutput(t *testing.T) {
 	}
 }
 
+func TestDownload_SummaryIntervalReadoutInteraction(t *testing.T) {
+	SkipIfNoRef(t)
+	requireRefHelpOptions(t, "summary-interval", "show-console-readout", "stop")
+
+	t.Run("summary_interval_zero_suppresses_summary_with_readout_enabled", func(t *testing.T) {
+		ref, impl := runProgressLifecyclePair(t, []string{
+			"--show-console-readout=true",
+			"--summary-interval=0",
+		})
+
+		requireLifecycleInProgressExit(t, "ref summary-interval=0", ref)
+		requireLifecycleInProgressExit(t, "impl summary-interval=0", impl)
+		requireNoProgressSummary(t, "ref summary-interval=0", ref)
+		requireNoProgressSummary(t, "impl summary-interval=0", impl)
+		t.Logf("summary-interval=0 exits: ref=%d impl=%d", ref.ExitCode, impl.ExitCode)
+	})
+
+	t.Run("show_console_readout_false_still_emits_periodic_summary", func(t *testing.T) {
+		ref, impl := runProgressLifecyclePair(t, []string{
+			"--show-console-readout=false",
+			"--summary-interval=1",
+		})
+
+		requireLifecycleInProgressExit(t, "ref hidden readout summary", ref)
+		requireLifecycleInProgressExit(t, "impl hidden readout summary", impl)
+		requireHasProgressSummary(t, "ref hidden readout summary", ref)
+		requireHasProgressSummary(t, "impl hidden readout summary", impl)
+		t.Logf("hidden readout summary exits: ref=%d impl=%d", ref.ExitCode, impl.ExitCode)
+	})
+}
+
 func TestDownload_HelpDerivedOverwriteRenameResumeMatrix(t *testing.T) {
 	SkipIfNoRef(t)
 	requireRefHelpOptions(t,
@@ -122,6 +527,8 @@ func TestDownload_HelpDerivedOverwriteRenameResumeMatrix(t *testing.T) {
 		"allow-overwrite",
 		"auto-file-renaming",
 		"continue",
+		"always-resume",
+		"max-resume-failure-tries",
 	)
 
 	payload := []byte("replacement payload from local server\n")
@@ -227,6 +634,51 @@ func TestDownload_HelpDerivedOverwriteRenameResumeMatrix(t *testing.T) {
 		requireRangeStartingAt(t, "ref resume", refSrv.snapshot(), partial)
 		requireRangeStartingAt(t, "impl resume", implSrv.snapshot(), partial)
 	})
+
+	t.Run("max_resume_failure_tries_single_uri_restarts_immediately", func(t *testing.T) {
+		resumePayload := bytes.Repeat([]byte("0123456789abcdef"), 16*1024)
+		refSrv := newRecordingHTTPPayloadServerWithOptions(t, resumePayload, httpPayloadOptions{ignoreRange: true})
+		defer refSrv.Close()
+		implSrv := newRecordingHTTPPayloadServerWithOptions(t, resumePayload, httpPayloadOptions{ignoreRange: true})
+		defer implSrv.Close()
+
+		const partial = 32768
+		refDir, implDir := t.TempDir(), t.TempDir()
+		for _, dir := range []string{refDir, implDir} {
+			if err := os.WriteFile(filepath.Join(dir, "resume-fallback.bin"), resumePayload[:partial], 0o644); err != nil {
+				t.Fatalf("seed partial file: %v", err)
+			}
+		}
+
+		ref := runDownloadProcess(t, true, append(baseDownloadArgs(refDir, "resume-fallback.bin"),
+			"--continue=true",
+			"--always-resume=false",
+			"--allow-overwrite=false",
+			"--auto-file-renaming=false",
+			"--disk-cache=0",
+			"--split=1",
+			"--max-resume-failure-tries=2",
+			refSrv.URL+"/resume-fallback.bin",
+		), "")
+		impl := runDownloadProcess(t, false, append(baseDownloadArgs(implDir, "resume-fallback.bin"),
+			"--continue=true",
+			"--always-resume=false",
+			"--allow-overwrite=false",
+			"--auto-file-renaming=false",
+			"--disk-cache=0",
+			"--split=1",
+			"--max-resume-failure-tries=2",
+			implSrv.URL+"/resume-fallback.bin",
+		), "")
+
+		AssertEqualExit(t, ref, impl)
+		requireExitSuccess(t, "ref max-resume-failure-tries", ref)
+		requireExitSuccess(t, "impl max-resume-failure-tries", impl)
+		requireDownloadedBytes(t, filepath.Join(refDir, "resume-fallback.bin"), resumePayload)
+		requireDownloadedBytes(t, filepath.Join(implDir, "resume-fallback.bin"), resumePayload)
+		requireResumeThenScratchRestart(t, "ref max-resume-failure-tries", refSrv.snapshot(), partial)
+		requireResumeThenScratchRestart(t, "impl max-resume-failure-tries", implSrv.snapshot(), partial)
+	})
 }
 
 func TestDownload_HelpDerivedInputFileAndStdinMatrix(t *testing.T) {
@@ -274,6 +726,129 @@ func TestDownload_HelpDerivedInputFileAndStdinMatrix(t *testing.T) {
 		requireDownloadedBytes(t, filepath.Join(refDir, "from-stdin.bin"), payload)
 		requireDownloadedBytes(t, filepath.Join(implDir, "from-stdin.bin"), payload)
 	})
+}
+
+func TestDownload_InputFileMissingFailsLikeRef(t *testing.T) {
+	SkipIfNoRef(t)
+
+	missing := filepath.Join(t.TempDir(), "missing.input")
+	args := append(inputFileArgs(), "--input-file="+missing)
+
+	ref := runDownloadProcess(t, true, args, "")
+	impl := runDownloadProcess(t, false, args, "")
+
+	AssertEqualExit(t, ref, impl)
+	if ref.ExitCode == 0 || impl.ExitCode == 0 {
+		t.Fatalf("missing input file should fail: ref=%d impl=%d", ref.ExitCode, impl.ExitCode)
+	}
+}
+
+func TestDownload_DeferredInputKeepsLaterEntriesOutOfWaitingQueue(t *testing.T) {
+	SkipIfNoRef(t)
+	requireRefHelpOptions(t, "deferred-input", "input-file", "max-concurrent-downloads")
+
+	type requestLog struct {
+		mu    sync.Mutex
+		paths []string
+	}
+	log := &requestLog{}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.mu.Lock()
+		log.paths = append(log.paths, r.URL.Path)
+		log.mu.Unlock()
+
+		switch r.URL.Path {
+		case "/one.bin":
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			w.Header().Set("Content-Length", "1048576")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(bytes.Repeat([]byte("x"), 1024))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		case "/two.bin":
+			w.Header().Set("Content-Length", "128")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(bytes.Repeat([]byte("y"), 128))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer func() {
+		close(release)
+		srv.Close()
+	}()
+
+	runProbe := func(t *testing.T, ref bool) {
+		t.Helper()
+
+		dir := t.TempDir()
+		inputPath := filepath.Join(dir, "input.txt")
+		data := inputFileStanza(srv.URL+"/one.bin", dir, "one.bin") +
+			inputFileStanza(srv.URL+"/two.bin", dir, "two.bin")
+		if err := os.WriteFile(inputPath, []byte(data), 0o644); err != nil {
+			t.Fatalf("write input file: %v", err)
+		}
+
+		port := findFreePort(t)
+		args := []string{
+			"--input-file=" + inputPath,
+			"--deferred-input=true",
+			"--max-concurrent-downloads=1",
+			"--allow-overwrite=true",
+			"--auto-file-renaming=false",
+			"--file-allocation=none",
+			"--quiet=true",
+			"--show-console-readout=false",
+			"--summary-interval=0",
+			"--enable-dht=false",
+			"--enable-dht6=false",
+		}
+
+		var rpcSrv *rpcServer
+		if ref {
+			rpcSrv = startRPCRef(t, port, args...)
+			rpcSrv.WaitReady(t)
+		} else {
+			rpcSrv = startRPCImpl(t, port, args...)
+			rpcSrv.WaitReadyOrSkip(t)
+		}
+		defer rpcSrv.Stop(t)
+
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for first deferred input request")
+		}
+
+		result := rpcCallOK(t, port, "aria2.tellWaiting", []any{float64(0), float64(10)})
+		var waiting []map[string]json.RawMessage
+		if err := json.Unmarshal(result.Result, &waiting); err != nil {
+			t.Fatalf("unmarshal tellWaiting: %v", err)
+		}
+		if len(waiting) != 0 {
+			t.Fatalf("waiting queue length = %d, want 0 while deferred input is blocked on the first entry", len(waiting))
+		}
+	}
+
+	t.Run("ref", func(t *testing.T) { runProbe(t, true) })
+	t.Run("impl", func(t *testing.T) { runProbe(t, false) })
+
+	log.mu.Lock()
+	paths := append([]string(nil), log.paths...)
+	log.mu.Unlock()
+	if slices.Contains(paths, "/two.bin") {
+		t.Fatalf("second deferred entry was requested early: %v", paths)
+	}
 }
 
 func TestDownload_HelpDerivedOutputRoutingMatrix(t *testing.T) {
@@ -449,6 +1024,46 @@ func TestDownload_HelpDerivedConditionalRemoteTimeContentDispositionMatrix(t *te
 		requireExitSuccess(t, "impl content-disposition", impl)
 		requireDownloadedBytes(t, filepath.Join(refDir, "server-name.bin"), payload)
 		requireDownloadedBytes(t, filepath.Join(implDir, "server-name.bin"), payload)
+	})
+
+	t.Run("content_disposition_default_utf8_matches_source_truth", func(t *testing.T) {
+		payload := []byte("content disposition utf8 payload\n")
+		header := "attachment; filename=\"caf\xc3\xa9.txt\""
+		srv := newRecordingHTTPPayloadServerWithOptions(t, payload, httpPayloadOptions{
+			contentDisposition: header,
+		})
+		defer srv.Close()
+
+		tests := []struct {
+			name     string
+			flag     string
+			wantFile string
+		}{
+			{name: "default_false_uses_latin1_fallback", flag: "--content-disposition-default-utf8=false", wantFile: "cafÃ©.txt"},
+			{name: "default_true_keeps_utf8", flag: "--content-disposition-default-utf8=true", wantFile: "café.txt"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				refDir, implDir := t.TempDir(), t.TempDir()
+				ref := runDownloadProcess(t, true, append(baseDownloadArgs(refDir, ""),
+					tt.flag,
+					"--allow-overwrite=true",
+					srv.URL+"/utf8-download",
+				), "")
+				impl := runDownloadProcess(t, false, append(baseDownloadArgs(implDir, ""),
+					tt.flag,
+					"--allow-overwrite=true",
+					srv.URL+"/utf8-download",
+				), "")
+
+				AssertEqualExit(t, ref, impl)
+				requireExitSuccess(t, "ref "+tt.name, ref)
+				requireExitSuccess(t, "impl "+tt.name, impl)
+				requireDownloadedBytes(t, filepath.Join(refDir, tt.wantFile), payload)
+				requireDownloadedBytes(t, filepath.Join(implDir, tt.wantFile), payload)
+			})
+		}
 	})
 }
 
@@ -665,6 +1280,7 @@ type httpRequestRecord struct {
 type httpPayloadOptions struct {
 	lastModified       string
 	contentDisposition string
+	ignoreRange        bool
 }
 
 func newRecordingHTTPPayloadServer(t *testing.T, payload []byte) *recordingHTTPPayloadServer {
@@ -715,10 +1331,13 @@ func newRecordingHTTPPayloadServerWithOptions(t *testing.T, payload []byte, opts
 			w.Header().Set("Content-Disposition", opts.contentDisposition)
 		}
 
-		start, end, partial, ok := parseRangeHeader(r.Header.Get("Range"), int64(len(payload)))
-		if !ok {
-			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-			return
+		start, end, partial, ok := int64(0), int64(len(payload))-1, false, true
+		if !opts.ignoreRange {
+			start, end, partial, ok = parseRangeHeader(r.Header.Get("Range"), int64(len(payload)))
+			if !ok {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
 		}
 		body := payload[start : end+1]
 		if partial {
@@ -805,6 +1424,69 @@ func requireRangeStartingAt(t *testing.T, label string, snap httpPayloadSnapshot
 	t.Fatalf("%s server saw no resume range starting at %d; ranges=%v", label, offset, snap.ranges)
 }
 
+func requireResumeThenScratchRestart(t *testing.T, label string, snap httpPayloadSnapshot, offset int) {
+	t.Helper()
+
+	wantPrefix := fmt.Sprintf("bytes=%d-", offset)
+	scratchPrefix := "bytes=0-"
+	sawResume := false
+	sawScratch := false
+	for _, req := range snap.requests {
+		if req.rangeHeader == "" || strings.HasPrefix(req.rangeHeader, scratchPrefix) {
+			if sawResume {
+				sawScratch = true
+				break
+			}
+			continue
+		}
+		if req.rangeHeader == wantPrefix || strings.HasPrefix(req.rangeHeader, wantPrefix) {
+			sawResume = true
+		}
+	}
+	if !sawResume || !sawScratch {
+		t.Fatalf("%s expected resume request followed by scratch restart; requests=%#v", label, snap.requests)
+	}
+}
+
+func requireNoGetScratchRestart(t *testing.T, label string, snap httpPayloadSnapshot, offset int) {
+	t.Helper()
+
+	wantPrefix := fmt.Sprintf("bytes=%d-", offset)
+	sawResume := false
+	for _, req := range snap.requests {
+		if req.method != http.MethodGet {
+			continue
+		}
+		if req.rangeHeader == wantPrefix || strings.HasPrefix(req.rangeHeader, wantPrefix) {
+			sawResume = true
+			continue
+		}
+		if sawResume && (req.rangeHeader == "" || strings.HasPrefix(req.rangeHeader, "bytes=0-")) {
+			t.Fatalf("%s unexpectedly restarted from scratch; requests=%#v", label, snap.requests)
+		}
+	}
+}
+
+func requireFileSize(t *testing.T, path string, want int64) {
+	t.Helper()
+
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if st.Size() != want {
+		t.Fatalf("file size for %s = %d, want %d", path, st.Size(), want)
+	}
+}
+
+func requireControlFileExists(t *testing.T, path string) {
+	t.Helper()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected control file %s: %v", path, err)
+	}
+}
+
 func requireOutputRoutedToStderr(t *testing.T, label string, result RunResult) {
 	t.Helper()
 
@@ -816,6 +1498,42 @@ func requireOutputRoutedToStderr(t *testing.T, label string, result RunResult) {
 	}
 	if strings.Contains(result.Stderr, "Download Progress Summary") {
 		t.Errorf("%s stderr contains progress summary despite --summary-interval=0:\n%s", label, result.Stderr)
+	}
+}
+
+func runProgressLifecyclePair(t *testing.T, extra []string) (RunResult, RunResult) {
+	t.Helper()
+
+	srv := newBlockingDownloadServer(t)
+	refDir, implDir := t.TempDir(), t.TempDir()
+	common := []string{
+		"--quiet=false",
+		"--console-log-level=error",
+		"--stop=2",
+		"--allow-overwrite=true",
+		"--auto-file-renaming=false",
+		"--max-connection-per-server=1",
+		"--split=1",
+	}
+
+	ref := runDownloadProcess(t, true, append(append(baseDownloadArgs(refDir, "progress.bin"), common...), append(extra, srv.URL+"/progress.bin")...), "")
+	impl := runDownloadProcess(t, false, append(append(baseDownloadArgs(implDir, "progress.bin"), common...), append(extra, srv.URL+"/progress.bin")...), "")
+	return ref, impl
+}
+
+func requireNoProgressSummary(t *testing.T, label string, result RunResult) {
+	t.Helper()
+	combined := result.Stdout + result.Stderr
+	if strings.Contains(combined, "Download Progress Summary") {
+		t.Fatalf("%s contains progress summary unexpectedly:\n%s", label, combined)
+	}
+}
+
+func requireHasProgressSummary(t *testing.T, label string, result RunResult) {
+	t.Helper()
+	combined := result.Stdout + result.Stderr
+	if !strings.Contains(combined, "Download Progress Summary") {
+		t.Fatalf("%s missing progress summary:\nstdout=%s\nstderr=%s", label, result.Stdout, result.Stderr)
 	}
 }
 

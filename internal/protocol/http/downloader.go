@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/smartass08/aria2go/internal/core"
+	"github.com/smartass08/aria2go/internal/hash"
 	"github.com/smartass08/aria2go/internal/ioutilx"
 	"github.com/smartass08/aria2go/internal/netx"
 )
@@ -54,37 +55,63 @@ type RequestOptions struct {
 	IfModifiedSince string
 }
 
+// ResponseDigest is a parsed Digest response-header entry.
+type ResponseDigest struct {
+	Kind   hash.Kind
+	Digest []byte
+}
+
 // ResourceInfo describes HTTP metadata discovered during probing.
 type ResourceInfo struct {
 	Size                       int64
 	ETag                       string
 	AcceptsRanges              bool
+	Inflated                   bool
 	ContentDispositionFilename string
 	LastModified               time.Time
+	Digests                    []ResponseDigest
+}
+
+// DownloadResponse wraps an HTTP response body with metadata needed by the
+// engine to preserve aria2's content-encoding semantics.
+type DownloadResponse struct {
+	Body     io.ReadCloser
+	Inflated bool
+	Digests  []ResponseDigest
+}
+
+type pendingProbeResponse struct {
+	uri    string
+	opts   RequestOptions
+	resp   *http.Response
+	cancel context.CancelFunc
 }
 
 // Driver is an HTTP download driver wrapping a single http.Client.
 type Driver struct {
-	client            *http.Client
-	ua                string
-	hdrs              http.Header
-	acceptEncoding    string
-	noCache           bool
-	disableKeepAlive  bool
-	enableWantDigest  bool
-	referer           string
-	ifModifiedSince   string
-	httpUser          string
-	httpPasswd        string
-	httpAuthChallenge bool
-	acceptMetalink    bool
-	useHead           bool
-	dryRun            bool
+	client                        *http.Client
+	ua                            string
+	hdrs                          http.Header
+	acceptEncoding                string
+	noCache                       bool
+	disableKeepAlive              bool
+	enableWantDigest              bool
+	referer                       string
+	ifModifiedSince               string
+	httpUser                      string
+	httpPasswd                    string
+	httpAuthChallenge             bool
+	contentDispositionDefaultUTF8 bool
+	acceptMetalink                bool
+	useHead                       bool
+	dryRun                        bool
 
 	userOverrideKeys map[string]bool
 	builtinHeaders   []headerKV
 	authMu           sync.Mutex
 	basicAuthScopes  map[basicAuthScope]struct{}
+	probeMu          sync.Mutex
+	pendingProbe     *pendingProbeResponse
 }
 
 // Opts configures a Driver.
@@ -92,6 +119,7 @@ type Opts struct {
 	Dialer           *netx.Dialer
 	TLS              *tls.Config
 	Jar              http.CookieJar
+	ProxyURL         *url.URL
 	UserAgent        string
 	Header           []string
 	Headers          http.Header
@@ -120,6 +148,10 @@ type Opts struct {
 
 	// HTTPAuthChallenge sends HTTP Authorization only after a 401 challenge.
 	HTTPAuthChallenge bool
+
+	// ContentDispositionDefaultUTF8 treats plain Content-Disposition filename
+	// parameters as UTF-8 instead of ISO-8859-1.
+	ContentDispositionDefaultUTF8 bool
 
 	// AcceptMetalink appends metalink MIME types to the Accept header.
 	AcceptMetalink bool
@@ -150,6 +182,9 @@ func NewDriver(opts Opts) *Driver {
 			}
 			return (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, addr)
 		},
+	}
+	if opts.ProxyURL != nil {
+		tr.Proxy = http.ProxyURL(opts.ProxyURL)
 	}
 
 	timeout := opts.Timeout
@@ -197,23 +232,24 @@ func NewDriver(opts Opts) *Driver {
 			Jar:           opts.Jar,
 			CheckRedirect: redirectPolicy(opts.MaxRedirs),
 		},
-		ua:                ua,
-		hdrs:              clonedHdrs,
-		acceptEncoding:    opts.AcceptEncoding,
-		noCache:           noCache,
-		disableKeepAlive:  opts.DisableKeepAlive,
-		enableWantDigest:  enableWantDigest,
-		referer:           opts.Referer,
-		ifModifiedSince:   opts.IfModifiedSince,
-		httpUser:          opts.HTTPUser,
-		httpPasswd:        opts.HTTPPasswd,
-		httpAuthChallenge: opts.HTTPAuthChallenge,
-		acceptMetalink:    opts.AcceptMetalink,
-		useHead:           opts.UseHead,
-		dryRun:            opts.DryRun,
-		userOverrideKeys:  userOverrideKeys,
-		builtinHeaders:    builtinHeaders,
-		basicAuthScopes:   make(map[basicAuthScope]struct{}),
+		ua:                            ua,
+		hdrs:                          clonedHdrs,
+		acceptEncoding:                opts.AcceptEncoding,
+		noCache:                       noCache,
+		disableKeepAlive:              opts.DisableKeepAlive,
+		enableWantDigest:              enableWantDigest,
+		referer:                       opts.Referer,
+		ifModifiedSince:               opts.IfModifiedSince,
+		httpUser:                      opts.HTTPUser,
+		httpPasswd:                    opts.HTTPPasswd,
+		httpAuthChallenge:             opts.HTTPAuthChallenge,
+		contentDispositionDefaultUTF8: opts.ContentDispositionDefaultUTF8,
+		acceptMetalink:                opts.AcceptMetalink,
+		useHead:                       opts.UseHead,
+		dryRun:                        opts.DryRun,
+		userOverrideKeys:              userOverrideKeys,
+		builtinHeaders:                builtinHeaders,
+		basicAuthScopes:               make(map[basicAuthScope]struct{}),
 	}
 }
 
@@ -248,9 +284,11 @@ func addHeaderStrings(h http.Header, values []string) {
 	}
 }
 
-// Probe checks if a URL is reachable and returns the resource size. It sends a
-// HEAD request first; if the server does not reply with a valid Content-Length,
-// or HEAD is unsupported, it falls back to a GET with Range: bytes=0-0.
+// Probe checks if a URL is reachable and returns the resource size. By default
+// it uses a GET with Range: bytes=0-0. When transparent content inflation is
+// enabled, ranged probing is avoided and the full GET response can be reused
+// for the subsequent download. When UseHead or DryRun is enabled, probing
+// starts with HEAD and falls back as needed.
 // cdFilename is the Content-Disposition filename if present and valid.
 func (d *Driver) Probe(ctx context.Context, uri string) (size int64, etag string, acceptsRanges bool, cdFilename string, err error) {
 	info, err := d.ProbeInfo(ctx, uri)
@@ -268,8 +306,13 @@ func (d *Driver) ProbeInfo(ctx context.Context, uri string) (ResourceInfo, error
 // ProbeInfoWithOptions checks if a URL is reachable using per-request options
 // and returns HTTP resource metadata.
 func (d *Driver) ProbeInfoWithOptions(ctx context.Context, uri string, opts RequestOptions) (ResourceInfo, error) {
+	d.clearPendingProbeResponse()
+
 	unescapedURI := unescapeURI(uri)
-	if !d.useHead && !d.dryRun {
+	if d.acceptEncoding != "" && !d.useHead && !d.dryRun {
+		return d.probeGETNoRange(ctx, uri, unescapedURI, opts, true)
+	}
+	if d.acceptEncoding == "" && !d.useHead && !d.dryRun {
 		info, err := d.probeGETRange(ctx, uri, unescapedURI, opts)
 		if err == nil {
 			return info, nil
@@ -307,11 +350,16 @@ func (d *Driver) ProbeInfoWithOptions(ctx context.Context, uri string, opts Requ
 		}
 
 		if headErr == nil {
-			headInfo = responseResourceInfo(resp)
+			headInfo = d.responseResourceInfo(resp)
 			resp.Body.Close()
 
 			if resp.StatusCode == http.StatusNotModified && requestIsConditional(opts, d.ifModifiedSince) {
 				return headInfo, ErrNotModified
+			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 && d.shouldInflateContentEncoding(resp) {
+				headInfo.Size = 0
+				headInfo.AcceptsRanges = false
+				return headInfo, nil
 			}
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength > 0 {
 				headInfo.Size = resp.ContentLength
@@ -324,6 +372,23 @@ func (d *Driver) ProbeInfoWithOptions(ctx context.Context, uri string, opts Requ
 				}
 			}
 		}
+	}
+
+	if d.acceptEncoding != "" {
+		fbInfo, fbErr := d.probeGETNoRange(ctx, uri, unescapedURI, opts, true)
+		if fbErr != nil {
+			if headErr != nil {
+				return ResourceInfo{}, fmt.Errorf("http: probe fallback could not determine size after HEAD failure: %v: %w", fbErr, headErr)
+			}
+			return ResourceInfo{}, fbErr
+		}
+		if fbInfo.ContentDispositionFilename == "" {
+			fbInfo.ContentDispositionFilename = headInfo.ContentDispositionFilename
+		}
+		if fbInfo.LastModified.IsZero() {
+			fbInfo.LastModified = headInfo.LastModified
+		}
+		return fbInfo, nil
 	}
 
 	fbInfo, fbErr := d.probeGETRange(ctx, uri, unescapedURI, opts)
@@ -342,31 +407,36 @@ func (d *Driver) ProbeInfoWithOptions(ctx context.Context, uri string, opts Requ
 	return fbInfo, nil
 }
 
-type probeStatusError struct {
-	method     string
+// HTTPStatusError carries an HTTP response status code while preserving the
+// aria2-style core error code wrapped alongside it.
+type HTTPStatusError struct {
+	op         string
 	statusCode int
 	status     string
 }
 
-func (e *probeStatusError) Error() string {
-	return fmt.Sprintf("http: probe %s: %s", strings.ToLower(e.method), e.status)
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s: %s", e.op, e.status)
+}
+
+func (e *HTTPStatusError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
 }
 
 func httpStatusError(prefix string, statusCode int, status string) error {
+	statusErr := &HTTPStatusError{op: prefix, statusCode: statusCode, status: status}
 	code := statusErrorCode(statusCode)
-	if code == core.ExitUnknownError {
-		return fmt.Errorf("%s: %s", prefix, status)
-	}
-	return fmt.Errorf("%s: %s: %w", prefix, status, core.NewError(code, http.StatusText(statusCode)))
-}
-
-func probeHTTPStatusError(method string, resp *http.Response) error {
-	statusErr := &probeStatusError{method: method, statusCode: resp.StatusCode, status: resp.Status}
-	code := statusErrorCode(resp.StatusCode)
 	if code == core.ExitUnknownError {
 		return statusErr
 	}
-	return fmt.Errorf("%w: %w", statusErr, core.NewError(code, http.StatusText(resp.StatusCode)))
+	return fmt.Errorf("%w: %w", statusErr, core.NewError(code, http.StatusText(statusCode)))
+}
+
+func probeHTTPStatusError(method string, resp *http.Response) error {
+	return httpStatusError(fmt.Sprintf("http: probe %s", strings.ToLower(method)), resp.StatusCode, resp.Status)
 }
 
 func statusErrorCode(statusCode int) core.ErrorCode {
@@ -408,9 +478,14 @@ func (d *Driver) probeGETRange(ctx context.Context, uri, unescapedURI string, op
 	}
 	defer resp.Body.Close()
 
-	info := responseResourceInfo(resp)
+	info := d.responseResourceInfo(resp)
 	if resp.StatusCode == http.StatusNotModified && requestIsConditional(opts, d.ifModifiedSince) {
 		return info, ErrNotModified
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && d.shouldInflateContentEncoding(resp) {
+		info.Size = 0
+		info.AcceptsRanges = false
+		return info, nil
 	}
 
 	switch {
@@ -459,11 +534,86 @@ func probeHEADShouldFallbackForError(err error) bool {
 }
 
 func probeGETShouldFallbackForError(err error) bool {
-	var statusErr *probeStatusError
+	var statusErr *HTTPStatusError
 	if errors.As(err, &statusErr) {
 		return probeHEADStatusAllowsFallback(statusErr.statusCode)
 	}
 	return probeHEADShouldFallbackForError(err)
+}
+
+func (d *Driver) probeGETNoRange(ctx context.Context, uri, unescapedURI string, opts RequestOptions, cacheBody bool) (ResourceInfo, error) {
+	reqCtx := ctx
+	cancel := func() {}
+	if cacheBody {
+		reqCtx, cancel = context.WithCancel(ctx)
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, uri, nil)
+	if err != nil {
+		cancel()
+		return ResourceInfo{}, fmt.Errorf("http: probe get request: %w", err)
+	}
+	d.setHeadersWithOptions(req, opts)
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		cancel()
+		return ResourceInfo{}, fmt.Errorf("http: probe get: %w", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		retryResp, retryErr := d.authRetry(reqCtx, http.MethodGet, uri, unescapedURI, resp, opts)
+		if retryErr != nil {
+			cancel()
+			return ResourceInfo{}, fmt.Errorf("http: probe get auth retry: %w", retryErr)
+		}
+		if retryResp != nil {
+			resp = retryResp
+		}
+	}
+
+	info := d.responseResourceInfo(resp)
+	if resp.StatusCode == http.StatusNotModified && requestIsConditional(opts, d.ifModifiedSince) {
+		resp.Body.Close()
+		cancel()
+		return info, ErrNotModified
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		cancel()
+		return ResourceInfo{}, probeHTTPStatusError(http.MethodGet, resp)
+	}
+	if d.shouldInflateContentEncoding(resp) {
+		info.Size = 0
+		info.AcceptsRanges = false
+		if cacheBody {
+			d.storePendingProbeResponse(&pendingProbeResponse{
+				uri:    uri,
+				opts:   opts,
+				resp:   resp,
+				cancel: cancel,
+			})
+			return info, nil
+		}
+		resp.Body.Close()
+		cancel()
+		return info, nil
+	}
+	if resp.ContentLength > 0 {
+		info.Size = resp.ContentLength
+		info.AcceptsRanges = false
+	}
+	if cacheBody {
+		d.storePendingProbeResponse(&pendingProbeResponse{
+			uri:    uri,
+			opts:   opts,
+			resp:   resp,
+			cancel: cancel,
+		})
+		return info, nil
+	}
+	resp.Body.Close()
+	cancel()
+	return info, nil
 }
 
 // Download streams a URL to the returned io.ReadCloser starting at the
@@ -471,15 +621,30 @@ func probeGETShouldFallbackForError(err error) bool {
 // is requested.  When the returned reader is closed the underlying
 // request context is cancelled so idle connections are not leaked.
 func (d *Driver) Download(ctx context.Context, uri string, offset, size int64) (io.ReadCloser, error) {
-	return d.DownloadWithOptions(ctx, uri, offset, size, RequestOptions{})
+	resp, err := d.DownloadResponseWithOptions(ctx, uri, offset, size, RequestOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
 }
 
 // DownloadWithOptions streams a URL using per-request options.
 func (d *Driver) DownloadWithOptions(ctx context.Context, uri string, offset, size int64, opts RequestOptions) (io.ReadCloser, error) {
-	return d.downloadWithAuth(ctx, uri, offset, size, opts)
+	resp, err := d.DownloadResponseWithOptions(ctx, uri, offset, size, opts)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
 }
 
-func (d *Driver) downloadWithAuth(ctx context.Context, uri string, offset, size int64, opts RequestOptions) (io.ReadCloser, error) {
+// DownloadResponseWithOptions streams a URL using per-request options and
+// reports whether the body is being transparently inflated from
+// Content-Encoding.
+func (d *Driver) DownloadResponseWithOptions(ctx context.Context, uri string, offset, size int64, opts RequestOptions) (*DownloadResponse, error) {
+	if pending := d.takePendingProbeResponse(uri, opts, offset, size); pending != nil {
+		return d.finishDownloadResponse(pending.resp, offset, size, opts, pending.cancel)
+	}
+
 	reqCtx, cancel := context.WithCancel(ctx)
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, uri, nil)
@@ -505,7 +670,12 @@ func (d *Driver) downloadWithAuth(ctx context.Context, uri string, offset, size 
 			resp = retryResp
 		}
 	}
-	if err := validateDownloadResponse(resp, offset, size, requestIsConditional(opts, d.ifModifiedSince)); err != nil {
+	return d.finishDownloadResponse(resp, offset, size, opts, cancel)
+}
+
+func (d *Driver) finishDownloadResponse(resp *http.Response, offset, size int64, opts RequestOptions, cancel context.CancelFunc) (*DownloadResponse, error) {
+	inflated := d.shouldInflateContentEncoding(resp)
+	if err := validateDownloadResponse(resp, offset, size, requestIsConditional(opts, d.ifModifiedSince), inflated); err != nil {
 		resp.Body.Close()
 		cancel()
 		return nil, err
@@ -518,15 +688,23 @@ func (d *Driver) downloadWithAuth(ctx context.Context, uri string, offset, size 
 		return nil, err
 	}
 
-	return &cancelReadCloser{ReadCloser: newBufReadCloser(body), cancel: cancel}, nil
+	return &DownloadResponse{
+		Body:     &cancelReadCloser{ReadCloser: newBufReadCloser(body), cancel: cancel},
+		Inflated: inflated,
+		Digests:  cloneResponseDigests(parseResponseDigests(resp)),
+	}, nil
 }
 
-func validateDownloadResponse(resp *http.Response, offset, size int64, conditional bool) error {
+func validateDownloadResponse(resp *http.Response, offset, size int64, conditional, inflated bool) error {
 	if resp.StatusCode == http.StatusNotModified && conditional {
 		return ErrNotModified
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return httpStatusError("http: download", resp.StatusCode, resp.Status)
+	}
+	if inflated && (offset > 0 || size > 0 || resp.StatusCode == http.StatusPartialContent) {
+		return fmt.Errorf("%w: %s: %w", ErrRangeIgnored, resp.Status,
+			core.NewError(core.ExitRemoteFileError, "cannot resume"))
 	}
 	if resp.StatusCode == http.StatusPartialContent && offset == 0 && size == 0 {
 		return fmt.Errorf("http: download: unexpected partial response without requested range: %w",
@@ -553,6 +731,18 @@ func validateDownloadResponse(resp *http.Response, offset, size int64, condition
 		}
 	}
 	return nil
+}
+
+func (d *Driver) shouldInflateContentEncoding(resp *http.Response) bool {
+	if resp == nil || d.acceptEncoding == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
+	case "gzip", "x-gzip", "deflate":
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Driver) responseBody(resp *http.Response) (io.ReadCloser, error) {
@@ -596,8 +786,54 @@ func (r *decodeReadCloser) Close() error {
 
 // Close closes the driver's idle connections.
 func (d *Driver) Close() error {
+	d.clearPendingProbeResponse()
 	d.client.CloseIdleConnections()
 	return nil
+}
+
+func (d *Driver) storePendingProbeResponse(pending *pendingProbeResponse) {
+	d.replacePendingProbeResponse(pending)
+}
+
+func (d *Driver) clearPendingProbeResponse() {
+	d.replacePendingProbeResponse(nil)
+}
+
+func (d *Driver) takePendingProbeResponse(uri string, opts RequestOptions, offset, size int64) *pendingProbeResponse {
+	d.probeMu.Lock()
+	pending := d.pendingProbe
+	d.pendingProbe = nil
+	d.probeMu.Unlock()
+
+	if pending == nil {
+		return nil
+	}
+	if offset == 0 && size == 0 && pending.uri == uri && pending.opts == opts {
+		return pending
+	}
+	closePendingProbeResponse(pending)
+	return nil
+}
+
+func (d *Driver) replacePendingProbeResponse(pending *pendingProbeResponse) {
+	d.probeMu.Lock()
+	prev := d.pendingProbe
+	d.pendingProbe = pending
+	d.probeMu.Unlock()
+
+	closePendingProbeResponse(prev)
+}
+
+func closePendingProbeResponse(pending *pendingProbeResponse) {
+	if pending == nil {
+		return
+	}
+	if pending.resp != nil && pending.resp.Body != nil {
+		pending.resp.Body.Close()
+	}
+	if pending.cancel != nil {
+		pending.cancel()
+	}
 }
 
 func buildBuiltinHeaders(ua string, acceptMetalink, noCache bool,
@@ -692,7 +928,7 @@ func (d *Driver) setHeadersWithOptions(req *http.Request, opts RequestOptions) {
 	}
 }
 
-func contentDispositionFilename(resp *http.Response) string {
+func contentDispositionFilename(resp *http.Response, defaultUTF8 bool) string {
 	if resp == nil {
 		return ""
 	}
@@ -700,23 +936,93 @@ func contentDispositionFilename(resp *http.Response) string {
 	if cd == "" {
 		return ""
 	}
-	filename, ok := ParseContentDisposition(cd)
+	filename, ok := ParseContentDispositionWithOptions(cd, defaultUTF8)
 	if !ok {
 		return ""
 	}
 	return filename
 }
 
-func responseResourceInfo(resp *http.Response) ResourceInfo {
+func (d *Driver) responseResourceInfo(resp *http.Response) ResourceInfo {
 	if resp == nil {
 		return ResourceInfo{}
 	}
 	return ResourceInfo{
 		ETag:                       resp.Header.Get("ETag"),
 		AcceptsRanges:              strings.EqualFold(resp.Header.Get("Accept-Ranges"), "bytes"),
-		ContentDispositionFilename: contentDispositionFilename(resp),
+		Inflated:                   d.shouldInflateContentEncoding(resp),
+		ContentDispositionFilename: contentDispositionFilename(resp, d.contentDispositionDefaultUTF8),
 		LastModified:               lastModifiedTime(resp),
+		Digests:                    parseResponseDigests(resp),
 	}
+}
+
+func parseResponseDigests(resp *http.Response) []ResponseDigest {
+	if resp == nil {
+		return nil
+	}
+	values := resp.Header.Values("Digest")
+	if len(values) == 0 {
+		return nil
+	}
+	digests := make([]ResponseDigest, 0, len(values))
+	for _, rawValue := range values {
+		for _, part := range strings.Split(rawValue, ",") {
+			name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if !ok {
+				continue
+			}
+			kind, ok := responseDigestKind(name)
+			if !ok {
+				continue
+			}
+			sum, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+			if err != nil || len(sum) != kind.Size() {
+				continue
+			}
+			digests = append(digests, ResponseDigest{
+				Kind:   kind,
+				Digest: append([]byte(nil), sum...),
+			})
+		}
+	}
+	if len(digests) == 0 {
+		return nil
+	}
+	return digests
+}
+
+func responseDigestKind(name string) (hash.Kind, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "md5":
+		return hash.MD5, true
+	case "sha", "sha-1":
+		return hash.SHA1, true
+	case "sha-224":
+		return hash.SHA224, true
+	case "sha-256":
+		return hash.SHA256, true
+	case "sha-384":
+		return hash.SHA384, true
+	case "sha-512":
+		return hash.SHA512, true
+	default:
+		return "", false
+	}
+}
+
+func cloneResponseDigests(src []ResponseDigest) []ResponseDigest {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]ResponseDigest, len(src))
+	for i, digest := range src {
+		dst[i] = ResponseDigest{
+			Kind:   digest.Kind,
+			Digest: append([]byte(nil), digest.Digest...),
+		}
+	}
+	return dst
 }
 
 func lastModifiedTime(resp *http.Response) time.Time {

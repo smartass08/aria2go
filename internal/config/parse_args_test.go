@@ -218,6 +218,12 @@ func TestParseArgsAccumulativeDHTPoint(t *testing.T) {
 	if len(opts.DHTEntryPoint) != 2 {
 		t.Fatalf("DHTEntryPoint length = %d, want 2", len(opts.DHTEntryPoint))
 	}
+	if opts.DHTEntryPointHost != "dht.transmissionbt.com" {
+		t.Fatalf("DHTEntryPointHost = %q, want dht.transmissionbt.com", opts.DHTEntryPointHost)
+	}
+	if opts.DHTEntryPointPort != "6881" {
+		t.Fatalf("DHTEntryPointPort = %q, want 6881", opts.DHTEntryPointPort)
+	}
 }
 
 func TestParseArgsAccumulativeIndexOut(t *testing.T) {
@@ -250,6 +256,12 @@ func TestParseArgsAccumulativeDHT6Point(t *testing.T) {
 	}
 	if len(opts.DHTEntryPoint6) != 2 {
 		t.Fatalf("DHTEntryPoint6 length = %d, want 2", len(opts.DHTEntryPoint6))
+	}
+	if opts.DHTEntryPointHost6 != "::2" {
+		t.Fatalf("DHTEntryPointHost6 = %q, want ::2", opts.DHTEntryPointHost6)
+	}
+	if opts.DHTEntryPointPort6 != "6881" {
+		t.Fatalf("DHTEntryPointPort6 = %q, want 6881", opts.DHTEntryPointPort6)
 	}
 }
 

@@ -13,6 +13,9 @@ func TestEngineDialerConfigWiresNetworkOptions(t *testing.T) {
 		ConnectTimeout:       "7",
 		Interface:            "eth0",
 		DisableIPv6:          true,
+		AsyncDNS:             true,
+		EnableAsyncDNS6:      true,
+		AsyncDNSServer:       "8.8.8.8,1.1.1.1:54",
 		SocketRecvBufferSize: "4096",
 		DSCP:                 "32",
 		MultipleInterface:    "eth0,eth1",
@@ -24,6 +27,18 @@ func TestEngineDialerConfigWiresNetworkOptions(t *testing.T) {
 	}
 	if got.Interface != "eth0" {
 		t.Fatalf("Interface = %q, want eth0", got.Interface)
+	}
+	if !got.PreferIPv4 {
+		t.Fatal("PreferIPv4 = false, want true when disable-ipv6 is set")
+	}
+	if !got.AsyncDNS {
+		t.Fatal("AsyncDNS = false, want true")
+	}
+	if !got.EnableAsyncDNS6 {
+		t.Fatal("EnableAsyncDNS6 = false, want true")
+	}
+	if got.AsyncDNSServer != "8.8.8.8,1.1.1.1:54" {
+		t.Fatalf("AsyncDNSServer = %q, want %q", got.AsyncDNSServer, "8.8.8.8,1.1.1.1:54")
 	}
 	if got.SocketRecvBufferSize != 4096 {
 		t.Fatalf("SocketRecvBufferSize = %d, want 4096", got.SocketRecvBufferSize)
@@ -67,5 +82,17 @@ func TestHTTPClientTLSConfigReportsReadErrors(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("httpClientTLSConfig() error = nil, want read error")
+	}
+}
+
+func TestHTTPClientTLSConfigIgnoresPrivateKeyWithoutCertificate(t *testing.T) {
+	got, err := httpClientTLSConfig(&config.Options{
+		PrivateKey: filepath.Join(t.TempDir(), "missing-key.pem"),
+	})
+	if err != nil {
+		t.Fatalf("httpClientTLSConfig() error = %v", err)
+	}
+	if len(got.Certificates) != 0 {
+		t.Fatalf("Certificates = %d, want 0", len(got.Certificates))
 	}
 }

@@ -1,11 +1,15 @@
 package conformance
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCLI_VersionOutput(t *testing.T) {
@@ -290,6 +294,51 @@ func TestCLI_ShortVersionFlag(t *testing.T) {
 	}
 }
 
+func TestCLI_StopTimerHaltsSlowDownload(t *testing.T) {
+	SkipIfNoRef(t)
+	requireRefHelpOptions(t, "stop", "dir", "out")
+
+	srv := newBlockingDownloadServer(t)
+	refDir, implDir := t.TempDir(), t.TempDir()
+
+	ref, refElapsed := runLifecycleCLIProbe(t, true, append(stopDownloadArgs(refDir, "stop.bin"),
+		"--stop=1",
+		srv.URL+"/stop.bin",
+	))
+	impl, implElapsed := runLifecycleCLIProbe(t, false, append(stopDownloadArgs(implDir, "stop.bin"),
+		"--stop=1",
+		srv.URL+"/stop.bin",
+	))
+
+	AssertEqualExit(t, ref, impl)
+	requireLifecycleInProgressExit(t, "ref --stop", ref)
+	requireLifecycleInProgressExit(t, "impl --stop", impl)
+	requireLifecycleElapsed(t, "ref --stop", refElapsed, 700*time.Millisecond, 5*time.Second)
+	requireLifecycleElapsed(t, "impl --stop", implElapsed, 700*time.Millisecond, 5*time.Second)
+	t.Logf("stop elapsed: ref=%s impl=%s exit(ref=%d impl=%d)", refElapsed, implElapsed, ref.ExitCode, impl.ExitCode)
+}
+
+func TestCLI_StopWithProcessHaltsAfterHelperExit(t *testing.T) {
+	SkipIfNoRef(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("helper process probe uses POSIX shell")
+	}
+	requireRefHelpOptions(t, "stop-with-process", "dir", "out")
+
+	srv := newBlockingDownloadServer(t)
+	refDir, implDir := t.TempDir(), t.TempDir()
+
+	ref, refElapsed := runStopWithProcessProbe(t, true, srv.URL+"/watch.bin", refDir, "watch.bin")
+	impl, implElapsed := runStopWithProcessProbe(t, false, srv.URL+"/watch.bin", implDir, "watch.bin")
+
+	AssertEqualExit(t, ref, impl)
+	requireLifecycleInProgressExit(t, "ref --stop-with-process", ref)
+	requireLifecycleInProgressExit(t, "impl --stop-with-process", impl)
+	requireLifecycleElapsed(t, "ref --stop-with-process", refElapsed, time.Second, 8*time.Second)
+	requireLifecycleElapsed(t, "impl --stop-with-process", implElapsed, time.Second, 8*time.Second)
+	t.Logf("stop-with-process elapsed: ref=%s impl=%s exit(ref=%d impl=%d)", refElapsed, implElapsed, ref.ExitCode, impl.ExitCode)
+}
+
 func uniqueMatches(matches []string) []string {
 	seen := make(map[string]bool)
 	var result []string
@@ -350,4 +399,103 @@ func removeString(values []string, value string) []string {
 		}
 	}
 	return out
+}
+
+func stopDownloadArgs(dir, out string) []string {
+	return []string{
+		"--dir=" + dir,
+		"--out=" + out,
+		"--allow-overwrite=true",
+		"--auto-file-renaming=false",
+		"--file-allocation=none",
+		"--max-connection-per-server=1",
+		"--split=1",
+		"--quiet=true",
+		"--show-console-readout=false",
+		"--summary-interval=0",
+		"--enable-dht=false",
+		"--enable-dht6=false",
+	}
+}
+
+func runLifecycleCLIProbe(t *testing.T, ref bool, args []string) (RunResult, time.Duration) {
+	t.Helper()
+
+	start := time.Now()
+	var (
+		result RunResult
+		err    error
+	)
+	opts := RunOptions{Timeout: 12 * time.Second}
+	if ref {
+		result, err = RunRefWithOptions(t, args, "", opts)
+	} else {
+		result, err = RunImplWithOptions(t, args, "", opts)
+	}
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("run lifecycle probe ref=%v: %v\nargs=%v\nstdout=%s\nstderr=%s", ref, err, args, result.Stdout, result.Stderr)
+	}
+	return result, elapsed
+}
+
+func runStopWithProcessProbe(t *testing.T, ref bool, url, dir, out string) (RunResult, time.Duration) {
+	t.Helper()
+
+	helper := startSleepHelper(t, 2*time.Second)
+	args := append(stopDownloadArgs(dir, out),
+		fmt.Sprintf("--stop-with-process=%d", helper.cmd.Process.Pid),
+		url,
+	)
+	result, elapsed := runLifecycleCLIProbe(t, ref, args)
+	if err := <-helper.done; err != nil {
+		t.Fatalf("wait helper process: %v", err)
+	}
+	return result, elapsed
+}
+
+type sleepHelper struct {
+	cmd  *exec.Cmd
+	done chan error
+}
+
+func startSleepHelper(t *testing.T, sleepFor time.Duration) *sleepHelper {
+	t.Helper()
+
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("POSIX shell not available for helper process")
+	}
+	cmd := exec.Command(shPath, "-c", fmt.Sprintf("sleep %d", int(sleepFor/time.Second)))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	helper := &sleepHelper{
+		cmd:  cmd,
+		done: make(chan error, 1),
+	}
+	go func() {
+		helper.done <- cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+			_ = cmd.Process.Kill()
+			<-helper.done
+		}
+	})
+	return helper
+}
+
+func requireLifecycleElapsed(t *testing.T, label string, elapsed, min, max time.Duration) {
+	t.Helper()
+	if elapsed < min || elapsed > max {
+		t.Fatalf("%s elapsed=%s want between %s and %s", label, elapsed, min, max)
+	}
+}
+
+func requireLifecycleInProgressExit(t *testing.T, label string, result RunResult) {
+	t.Helper()
+	if result.ExitCode != 7 {
+		t.Fatalf("%s exit=%d, want 7\nstdout=%s\nstderr=%s", label, result.ExitCode, result.Stdout, result.Stderr)
+	}
 }

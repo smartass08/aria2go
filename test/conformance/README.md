@@ -28,6 +28,23 @@ environment variables against both:
 Captured stdout, stderr, and exit codes are then compared using the
 assertion helpers.
 
+## Feature Matrix Guard
+
+`feature_matrix.json` is the machine-readable parity ledger. The guard tests in
+`feature_matrix_test.go` enforce that:
+
+- every feature has a valid status,
+- file references point at real local files,
+- `implemented` entries include `test/conformance` coverage,
+- every Go config option is owned by one feature row,
+- every advertised RPC method and notification is owned by one feature row,
+- every Go option exists in the C++ `prefs.cc` source truth, with explicit
+  exceptions for source-only helper prefs such as split DHT host/port entries.
+
+Use this matrix as the gate for feature claims. Parser-only or unit-test-only
+work should be marked `partial`, `missing`, or `tests-only` until a runtime
+conformance test exists.
+
 ## Available helpers
 
 | Function              | What it does                                                |

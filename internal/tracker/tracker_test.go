@@ -162,8 +162,8 @@ func TestBuildAnnounceRequest(t *testing.T) {
 	req.NumWant = 0
 	req.ExternalIP = "203.0.113.7"
 	buildAnnounceRequest(buf, connID, txnID, req)
-	if got := int32(binary.BigEndian.Uint32(buf[92:96])); got != -1 {
-		t.Errorf("default num_want = %d, want -1", got)
+	if got := int32(binary.BigEndian.Uint32(buf[92:96])); got != 0 {
+		t.Errorf("num_want = %d, want 0", got)
 	}
 	if got := net.IP(buf[84:88]).String(); got != "203.0.113.7" {
 		t.Errorf("external ip = %s, want 203.0.113.7", got)

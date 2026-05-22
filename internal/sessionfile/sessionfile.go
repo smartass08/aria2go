@@ -32,9 +32,9 @@ var knownKeys = buildKnownKeys()
 // (option::i2p(i) for i=1..countOption()-1), which is the registration
 // order of preferences in aria2's preference table.
 //
-// Note: gid (ID 99) and pause (ID 90) are emitted as special-first-keys
-// BEFORE the general iteration, AND again at their natural positions in
-// this list. Duplicate emission is intentional per aria2 behavior.
+// Note: gid and pause appear in aria2's preference order, but the session
+// serializer emits them separately and does not emit them again during the
+// general option iteration.
 //
 // Cumulative keys (header, bt-tracker, bt-exclude-tracker, index-out) have
 // each value written on its own line — the value is split by newline
@@ -281,6 +281,8 @@ var cumulativeKeys = map[string]bool{
 	"header":             true,
 	"bt-tracker":         true,
 	"bt-exclude-tracker": true,
+	"dht-entry-point":    true,
+	"dht-entry-point6":   true,
 	"index-out":          true,
 }
 

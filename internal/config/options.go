@@ -150,7 +150,11 @@ type Options struct {
 	DHTListenPort              string   `json:"dht-listen-port"`
 	DHTListenAddr              string   `json:"dht-listen-addr"` // hidden
 	DHTListenAddr6             string   `json:"dht-listen-addr6"`
+	DHTEntryPointHost          string   `json:"dht-entry-point-host"` // hidden
+	DHTEntryPointPort          string   `json:"dht-entry-point-port"` // hidden
 	DHTEntryPoint              []string `json:"dht-entry-point"`
+	DHTEntryPointHost6         string   `json:"dht-entry-point-host6"` // hidden
+	DHTEntryPointPort6         string   `json:"dht-entry-point-port6"` // hidden
 	DHTEntryPoint6             []string `json:"dht-entry-point6"`
 	DHTFilePath                string   `json:"dht-file-path"`
 	DHTFilePath6               string   `json:"dht-file-path6"`
@@ -378,7 +382,11 @@ func init() {
 		"dht-listen-port",
 		"dht-listen-addr",
 		"dht-listen-addr6",
+		"dht-entry-point-host",
+		"dht-entry-point-port",
 		"dht-entry-point",
+		"dht-entry-point-host6",
+		"dht-entry-point-port6",
 		"dht-entry-point6",
 		"dht-file-path",
 		"dht-file-path6",
@@ -477,6 +485,14 @@ func (o *Options) markExplicit(name string) {
 // constructs Options outside the parser package.
 func (o *Options) MarkExplicit(name string) {
 	o.markExplicit(name)
+}
+
+// ClearExplicit removes an explicit marker for name.
+func (o *Options) ClearExplicit(name string) {
+	if o == nil || o.explicit == nil {
+		return
+	}
+	delete(o.explicit, name)
 }
 
 // ExplicitNames returns the option names explicitly provided to this Options.

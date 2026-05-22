@@ -1022,8 +1022,6 @@ func TestSetCookiesMaxAgeZero(t *testing.T) {
 
 func TestSetCookiesMaxAgeNegative(t *testing.T) {
 	// C++ CookieHelperTest::testParse: Max-Age=-100 means delete immediately.
-	// Go's SetCookies: MaxAge < 0 means skip (don't store, don't delete existing).
-	// To delete, use MaxAge=0 or past Expires.
 	jar := New()
 	u, _ := url.Parse("https://example.com/")
 
@@ -1031,21 +1029,16 @@ func TestSetCookiesMaxAgeNegative(t *testing.T) {
 		{Name: "x", Value: "1", Domain: "example.com", Path: "/", Expires: time.Now().Add(time.Hour)},
 	})
 
-	// Negative MaxAge: skipped, doesn't delete existing
+	// Negative MaxAge: delete existing cookie.
 	jar.SetCookies(u, []*http.Cookie{
 		{Name: "x", Value: "2", Domain: "example.com", Path: "/", MaxAge: -100},
 	})
 
-	// Existing cookie remains (MaxAge < 0 only skips, doesn't delete)
 	got := jar.Cookies(u)
-	found := false
 	for _, c := range got {
-		if c.Name == "x" && c.Value == "1" {
-			found = true
+		if c.Name == "x" {
+			t.Error("cookie with negative MaxAge should delete existing cookie")
 		}
-	}
-	if !found {
-		t.Error("cookie with negative MaxAge should not delete existing cookie")
 	}
 }
 

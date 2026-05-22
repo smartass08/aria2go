@@ -1018,6 +1018,35 @@ func (s *Server) legacyFindNode(ctx context.Context, target NodeID, callback fun
 	s.findNode(ctx, target, node, callback)
 }
 
+// ObservePeerPort injects a BitTorrent peer's advertised DHT port into the
+// routing table by pinging the peer, matching aria2's BtPortMessage flow.
+func (s *Server) ObservePeerPort(ctx context.Context, ip net.IP, port uint16) {
+	ip4 := ip.To4()
+	if ip4 == nil || port == 0 || s.conn == nil {
+		return
+	}
+
+	addr := &net.UDPAddr{IP: ip4, Port: int(port)}
+	nodeID := RandomNodeID()
+	target := NodeInfo{
+		ID:   nodeID,
+		IP:   ipTo4(ip4),
+		Port: port,
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, messageTimeout)
+	defer cancel()
+
+	_ = s.sendQuery(pingCtx, QPing, addr, target.ID, nil, func(msg *Message, err error) {
+		if err != nil || msg == nil {
+			return
+		}
+		if s.rt.NumBuckets() == 1 {
+			go s.iterativeFindNode(ctx, s.cfg.NodeID, func(*Message, error) {})
+		}
+	})
+}
+
 func (s *Server) periodicTokenUpdate(ctx context.Context) {
 	ticker := time.NewTicker(tokenUpdateInt)
 	defer ticker.Stop()

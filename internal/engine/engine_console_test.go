@@ -13,17 +13,19 @@ import (
 
 func TestEngineConsoleOptionsWiresConfig(t *testing.T) {
 	opts := &config.Options{
-		Quiet:           true,
-		SummaryInterval: "60",
-		Stderr:          true,
+		Quiet:                  true,
+		SummaryInterval:        "60",
+		Stderr:                 true,
+		ShowConsoleReadout:     false,
+		TruncateConsoleReadout: false,
 	}
 
 	got := engineConsoleOptions(opts)
 	if !got.Quiet {
 		t.Error("Quiet = false, want true")
 	}
-	if !got.Summary {
-		t.Error("Summary = false, want true")
+	if got.SummaryInterval != 60*time.Second {
+		t.Errorf("SummaryInterval = %s, want 1m0s", got.SummaryInterval)
 	}
 	if got.Interactive {
 		t.Error("Interactive = true, want false when quiet")
@@ -31,15 +33,29 @@ func TestEngineConsoleOptionsWiresConfig(t *testing.T) {
 	if !got.Stderr {
 		t.Error("Stderr = false, want true")
 	}
+	if got.ShowReadout {
+		t.Error("ShowReadout = true, want false")
+	}
+	if got.Truncate {
+		t.Error("Truncate = true, want false")
+	}
 }
 
 func TestEngineConsoleOptionsSummaryDisabledWhenIntervalEmpty(t *testing.T) {
-	got := engineConsoleOptions(&config.Options{})
-	if got.Summary {
-		t.Error("Summary = true, want false")
+	opts := config.Default()
+	opts.SummaryInterval = ""
+	got := engineConsoleOptions(opts)
+	if got.SummaryInterval != 0 {
+		t.Errorf("SummaryInterval = %s, want 0", got.SummaryInterval)
 	}
 	if !got.Interactive {
 		t.Error("Interactive = false, want true when not quiet")
+	}
+	if !got.ShowReadout {
+		t.Error("ShowReadout = false, want true")
+	}
+	if !got.Truncate {
+		t.Error("Truncate = false, want true")
 	}
 }
 

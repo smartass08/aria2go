@@ -30,42 +30,42 @@ func TestRPC_MethodAvailabilityMatrix(t *testing.T) {
 			name:   "methods",
 			method: "system.listMethods",
 			expected: []string{
-				"aria2.addMetalink",
-				"aria2.addTorrent",
 				"aria2.addUri",
-				"aria2.changeGlobalOption",
-				"aria2.changeOption",
-				"aria2.changePosition",
-				"aria2.changeUri",
-				"aria2.forcePause",
-				"aria2.forcePauseAll",
-				"aria2.forceRemove",
-				"aria2.forceShutdown",
-				"aria2.getFiles",
-				"aria2.getGlobalOption",
-				"aria2.getGlobalStat",
-				"aria2.getOption",
+				"aria2.addTorrent",
 				"aria2.getPeers",
-				"aria2.getServers",
-				"aria2.getSessionInfo",
-				"aria2.getUris",
-				"aria2.getVersion",
-				"aria2.pause",
-				"aria2.pauseAll",
-				"aria2.purgeDownloadResult",
+				"aria2.addMetalink",
 				"aria2.remove",
-				"aria2.removeDownloadResult",
-				"aria2.saveSession",
-				"aria2.shutdown",
-				"aria2.tellActive",
-				"aria2.tellStopped",
-				"aria2.tellStatus",
-				"aria2.tellWaiting",
+				"aria2.pause",
+				"aria2.forcePause",
+				"aria2.pauseAll",
+				"aria2.forcePauseAll",
 				"aria2.unpause",
 				"aria2.unpauseAll",
+				"aria2.forceRemove",
+				"aria2.changePosition",
+				"aria2.tellStatus",
+				"aria2.getUris",
+				"aria2.getFiles",
+				"aria2.getServers",
+				"aria2.tellActive",
+				"aria2.tellWaiting",
+				"aria2.tellStopped",
+				"aria2.getOption",
+				"aria2.changeUri",
+				"aria2.changeOption",
+				"aria2.getGlobalOption",
+				"aria2.changeGlobalOption",
+				"aria2.purgeDownloadResult",
+				"aria2.removeDownloadResult",
+				"aria2.getVersion",
+				"aria2.getSessionInfo",
+				"aria2.shutdown",
+				"aria2.forceShutdown",
+				"aria2.getGlobalStat",
+				"aria2.saveSession",
+				"system.multicall",
 				"system.listMethods",
 				"system.listNotifications",
-				"system.multicall",
 			},
 		},
 		{
@@ -87,9 +87,9 @@ func TestRPC_MethodAvailabilityMatrix(t *testing.T) {
 			ref := rpcStringListResult(t, rpcCallOK(t, refPort, tc.method, []any{}))
 			impl := rpcStringListResult(t, rpcCallOK(t, implPort, tc.method, []any{}))
 
-			compareStringSet(t, tc.method, ref, impl)
-			requireStringSetEqual(t, "ref "+tc.method, ref, tc.expected)
-			requireStringSetEqual(t, "impl "+tc.method, impl, tc.expected)
+			requireStringSliceEqual(t, "ref "+tc.method, ref, tc.expected)
+			requireStringSliceEqual(t, "impl "+tc.method, impl, tc.expected)
+			requireStringSliceEqual(t, tc.method+" impl-vs-ref", impl, ref)
 		})
 	}
 }
@@ -245,10 +245,22 @@ func TestRPC_QueueControlMatrix(t *testing.T) {
 			assert: assertRPCSameJSON,
 		},
 		{
+			name:   "tellWaiting rejects negative num",
+			method: "aria2.tellWaiting",
+			params: []any{float64(0), float64(-1), []string{"gid", "status"}},
+			assert: assertRPCErrorSame,
+		},
+		{
 			name:   "tellStopped empty page",
 			method: "aria2.tellStopped",
 			params: []any{float64(0), float64(5), []string{"gid", "status"}},
 			assert: assertRPCSameJSON,
+		},
+		{
+			name:   "tellStopped rejects negative num",
+			method: "aria2.tellStopped",
+			params: []any{float64(0), float64(-1), []string{"gid", "status"}},
+			assert: assertRPCErrorSame,
 		},
 		{
 			name:   "getUris",
@@ -415,6 +427,108 @@ func TestRPC_QueueControlMatrix(t *testing.T) {
 	}
 }
 
+func TestRPC_URIArrayFilteringMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	refPort, implPort := startRPCPair(t, []string{"--no-conf"}, []string{"--no-conf"})
+
+	t.Run("addUri ignores non-string uri members", func(t *testing.T) {
+		const gid = "00000000000000e5"
+		const uriA = "http://127.0.0.1:1/mixed-a"
+		const uriB = "http://127.0.0.1:1/mixed-b"
+
+		params := []any{
+			[]any{uriA, float64(7), true, map[string]any{"uri": uriB}, uriB},
+			map[string]string{
+				"gid":   gid,
+				"pause": "true",
+			},
+		}
+		ref := rpcCallOK(t, refPort, "aria2.addUri", params)
+		impl := rpcCallOK(t, implPort, "aria2.addUri", params)
+		if got := rpcResultString(t, ref); got != gid {
+			t.Fatalf("ref addUri mixed filter gid got %q want %q", got, gid)
+		}
+		if got := rpcResultString(t, impl); got != gid {
+			t.Fatalf("impl addUri mixed filter gid got %q want %q", got, gid)
+		}
+
+		refUris := rpcCallOK(t, refPort, "aria2.getUris", []any{gid})
+		implUris := rpcCallOK(t, implPort, "aria2.getUris", []any{gid})
+		compareJSONValueEqual(t, "addUri mixed uri filtering", refUris.Result, implUris.Result)
+		requireURISet(t, "ref addUri mixed uri filtering", refUris.Result, []string{uriA, uriB}, nil)
+		requireURISet(t, "impl addUri mixed uri filtering", implUris.Result, []string{uriA, uriB}, nil)
+		if got := len(mustStringMapSlice(t, "ref addUri mixed uri filtering", refUris.Result)); got != 2 {
+			t.Fatalf("ref addUri mixed uri filtering count got %d want 2", got)
+		}
+		if got := len(mustStringMapSlice(t, "impl addUri mixed uri filtering", implUris.Result)); got != 2 {
+			t.Fatalf("impl addUri mixed uri filtering count got %d want 2", got)
+		}
+	})
+
+	t.Run("changeUri ignores non-string uri members", func(t *testing.T) {
+		const gid = "00000000000000f6"
+		const oldURI = "http://127.0.0.1:1/change-old"
+		const newURI = "http://127.0.0.1:1/change-new"
+
+		addPausedURI(t, refPort, gid, oldURI)
+		addPausedURI(t, implPort, gid, oldURI)
+
+		params := []any{
+			gid,
+			float64(1),
+			[]any{oldURI, float64(3), false},
+			[]any{newURI, float64(9), map[string]any{"uri": "ignored"}},
+			float64(0),
+		}
+		ref := rpcCallOK(t, refPort, "aria2.changeUri", params)
+		impl := rpcCallOK(t, implPort, "aria2.changeUri", params)
+		compareJSONValueEqual(t, "changeUri mixed uri filtering result", ref.Result, impl.Result)
+		requireNumberList(t, "ref changeUri mixed uri filtering result", ref.Result, []int{1, 1})
+		requireNumberList(t, "impl changeUri mixed uri filtering result", impl.Result, []int{1, 1})
+
+		refUris := rpcCallOK(t, refPort, "aria2.getUris", []any{gid})
+		implUris := rpcCallOK(t, implPort, "aria2.getUris", []any{gid})
+		compareJSONValueEqual(t, "changeUri mixed uri filtering", refUris.Result, implUris.Result)
+		requireURISet(t, "ref changeUri mixed uri filtering", refUris.Result, []string{newURI}, []string{oldURI})
+		requireURISet(t, "impl changeUri mixed uri filtering", implUris.Result, []string{newURI}, []string{oldURI})
+		if got := len(mustStringMapSlice(t, "ref changeUri mixed uri filtering", refUris.Result)); got != 1 {
+			t.Fatalf("ref changeUri mixed uri filtering count got %d want 1", got)
+		}
+		if got := len(mustStringMapSlice(t, "impl changeUri mixed uri filtering", implUris.Result)); got != 1 {
+			t.Fatalf("impl changeUri mixed uri filtering count got %d want 1", got)
+		}
+	})
+}
+
+func TestRPC_StoppedGIDChangeOptionRejectedMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	fileSrv := newBlockingDownloadServer(t)
+	refPort, implPort := startRPCPair(t, []string{"--no-conf"}, []string{"--no-conf"})
+
+	const gid = "00000000000000c5"
+	addURIWithGID(t, refPort, gid, fileSrv.URL+"/stopped-change-option-ref")
+	addURIWithGID(t, implPort, gid, fileSrv.URL+"/stopped-change-option-impl")
+	waitForRPCStatus(t, refPort, gid, "active")
+	waitForRPCStatus(t, implPort, gid, "active")
+
+	refRemove := rpcCallOK(t, refPort, "aria2.remove", []any{gid})
+	implRemove := rpcCallOK(t, implPort, "aria2.remove", []any{gid})
+	if got := rpcResultString(t, refRemove); got != gid {
+		t.Fatalf("ref remove gid got %q want %q", got, gid)
+	}
+	if got := rpcResultString(t, implRemove); got != gid {
+		t.Fatalf("impl remove gid got %q want %q", got, gid)
+	}
+	waitForRPCStatus(t, refPort, gid, "removed")
+	waitForRPCStatus(t, implPort, gid, "removed")
+
+	ref := rpcCall(t, refPort, "aria2.changeOption", []any{gid, map[string]string{"max-download-limit": "1M"}})
+	impl := rpcCall(t, implPort, "aria2.changeOption", []any{gid, map[string]string{"max-download-limit": "1M"}})
+	assertRPCErrorSame(t, "changeOption stopped gid", ref, impl)
+}
+
 func TestRPC_ActiveHTTPFixtureMatrix(t *testing.T) {
 	SkipIfNoRef(t)
 
@@ -475,6 +589,46 @@ func TestRPC_ActiveHTTPFixtureMatrix(t *testing.T) {
 			tc.assert(t, tc.method, ref, impl)
 		})
 	}
+}
+
+func TestRPC_WaitingRemoveDropsWithoutStoppedResultMatrix(t *testing.T) {
+	SkipIfNoRef(t)
+
+	dir := t.TempDir()
+	refPort, implPort := startRPCPair(t,
+		[]string{"--no-conf", "--dir=" + dir, "--pause=true"},
+		[]string{"--no-conf", "--dir=" + dir, "--pause=true"},
+	)
+
+	const gid = "0000000000000a55"
+	params := []any{
+		[]string{"http://127.0.0.1:1/stopped-fidelity"},
+		map[string]string{"gid": gid, "pause": "true"},
+	}
+	refAdd := rpcCallOK(t, refPort, "aria2.addUri", params)
+	implAdd := rpcCallOK(t, implPort, "aria2.addUri", params)
+	if got := rpcResultString(t, refAdd); got != gid {
+		t.Fatalf("ref addUri gid got %q want %q", got, gid)
+	}
+	if got := rpcResultString(t, implAdd); got != gid {
+		t.Fatalf("impl addUri gid got %q want %q", got, gid)
+	}
+
+	refRemove := rpcCallOK(t, refPort, "aria2.remove", []any{gid})
+	implRemove := rpcCallOK(t, implPort, "aria2.remove", []any{gid})
+	if got := rpcResultString(t, refRemove); got != gid {
+		t.Fatalf("ref remove gid got %q want %q", got, gid)
+	}
+	if got := rpcResultString(t, implRemove); got != gid {
+		t.Fatalf("impl remove gid got %q want %q", got, gid)
+	}
+	refStatus := rpcCall(t, refPort, "aria2.tellStatus", []any{gid})
+	implStatus := rpcCall(t, implPort, "aria2.tellStatus", []any{gid})
+	assertRPCErrorSame(t, "removed waiting tellStatus", refStatus, implStatus)
+
+	refStopped := rpcCallOK(t, refPort, "aria2.tellStopped", []any{float64(0), float64(1)})
+	implStopped := rpcCallOK(t, implPort, "aria2.tellStopped", []any{float64(0), float64(1)})
+	compareJSONValueEqual(t, "removed waiting tellStopped", refStopped.Result, implStopped.Result)
 }
 
 func TestRPC_UploadedMetadataMatrix(t *testing.T) {
@@ -641,6 +795,19 @@ func requireStringSetEqual(t *testing.T, label string, got, want []string) {
 	for value, gotCount := range gotSet {
 		if wantSet[value] != gotCount {
 			t.Errorf("%s: unexpected %q count %d", label, value, gotCount)
+		}
+	}
+}
+
+func requireStringSliceEqual(t *testing.T, label string, got, want []string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("%s: len got %d want %d\n got=%v\nwant=%v", label, len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s: [%d] got %q want %q\n got=%v\nwant=%v", label, i, got[i], want[i], got, want)
 		}
 	}
 }

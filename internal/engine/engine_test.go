@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/smartass08/aria2go/internal/config"
 	"github.com/smartass08/aria2go/internal/core"
 	btprogress "github.com/smartass08/aria2go/internal/protocol/bittorrent/progress"
+	"github.com/smartass08/aria2go/internal/sessionfile"
 	"github.com/smartass08/aria2go/internal/torrent"
 )
 
@@ -397,6 +400,16 @@ func TestResume(t *testing.T) {
 		t.Errorf("expected waiting status after resume, got %s", status.Status)
 	}
 
+	rg, ok := e.groups.getLocked(gid)
+	if !ok {
+		t.Fatalf("group %s not found after Resume()", gid)
+	}
+	if rg.restartReq {
+		e.groups.unlock(gid)
+		t.Fatal("restartReq = true after Resume(), want false")
+	}
+	e.groups.unlock(gid)
+
 	// It should still be in the waiting queue.
 	waiting := e.TellWaiting(0, 10)
 	found := false
@@ -431,6 +444,7 @@ func TestRemove(t *testing.T) {
 	}
 
 	gid, _ := e.Add(AddSpec{URIs: []string{"http://example.com/file.iso"}})
+	e.fillRequestGroupFromReserver()
 
 	if err := e.Remove(gid, false); err != nil {
 		t.Fatalf("Remove() error = %v", err)
@@ -549,6 +563,7 @@ func TestTellStopped(t *testing.T) {
 	}
 
 	gid, _ := e.Add(AddSpec{URIs: []string{"http://example.com/file.iso"}})
+	e.fillRequestGroupFromReserver()
 	e.Remove(gid, false)
 
 	stopped := e.TellStopped(0, 10)
@@ -568,7 +583,9 @@ func TestPurgeDownloadResult(t *testing.T) {
 
 	gid1, _ := e.Add(AddSpec{URIs: []string{"http://example.com/a"}})
 	gid2, _ := e.Add(AddSpec{URIs: []string{"http://example.com/b"}})
+	e.fillRequestGroupFromReserver()
 	e.Remove(gid1, false)
+	e.fillRequestGroupFromReserver()
 	e.Remove(gid2, false)
 
 	n := e.PurgeDownloadResult()
@@ -612,8 +629,8 @@ func TestRemoveDownloadResultRejectsActiveWaitingAndRemovesStopped(t *testing.T)
 	if err := e.Remove(waitingGID, false); err != nil {
 		t.Fatalf("Remove(waiting) error = %v", err)
 	}
-	if err := e.RemoveDownloadResult(waitingGID); err != nil {
-		t.Fatalf("RemoveDownloadResult(stopped) error = %v", err)
+	if err := e.RemoveDownloadResult(waitingGID); err == nil {
+		t.Fatal("RemoveDownloadResult(removed waiting) expected error")
 	}
 	if _, err := e.TellStatus(waitingGID); err == nil {
 		t.Fatal("TellStatus removed result expected error")
@@ -657,6 +674,90 @@ func TestChangeGlobalOption(t *testing.T) {
 	}
 }
 
+func TestChangeGlobalOption_RuntimeEffects(t *testing.T) {
+	e, err := New(testOpts(), testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	e.stoppedTotal.Store(7)
+	e.stoppedRing.push(&downloadResult{
+		gid:     0x11,
+		state:   core.StatusError,
+		errCode: core.ExitResourceNotFound,
+		statusSnapshot: Status{
+			GID:    0x11,
+			Status: core.StatusError,
+		},
+	})
+	e.stoppedRing.push(&downloadResult{
+		gid:     0x12,
+		state:   core.StatusRemoved,
+		errCode: core.ExitRemoved,
+		statusSnapshot: Status{
+			GID:    0x12,
+			Status: core.StatusRemoved,
+		},
+	})
+
+	opts := &config.Options{
+		AutoSaveInterval:            "7",
+		SaveSessionInterval:         "13",
+		MaxOverallDownloadLimit:     "200K",
+		MaxOverallUploadLimit:       "100K",
+		MaxDownloadResult:           1,
+		OptimizeConcurrentDownloads: "true",
+	}
+	for _, name := range []string{
+		"auto-save-interval",
+		"save-session-interval",
+		"max-overall-download-limit",
+		"max-overall-upload-limit",
+		"max-download-result",
+		"optimize-concurrent-downloads",
+	} {
+		opts.MarkExplicit(name)
+	}
+
+	if err := e.ChangeGlobalOption(opts); err != nil {
+		t.Fatalf("ChangeGlobalOption() error = %v", err)
+	}
+
+	if e.saveInterval != 7*time.Second {
+		t.Fatalf("saveInterval = %v, want 7s", e.saveInterval)
+	}
+	if e.saveSessionInterval != 13*time.Second {
+		t.Fatalf("saveSessionInterval = %v, want 13s", e.saveSessionInterval)
+	}
+	if e.rateGlobal.rate.Load() != 204800 {
+		t.Fatalf("rateGlobal = %d, want 204800", e.rateGlobal.rate.Load())
+	}
+	if e.rateGlobalUp.rate.Load() != 102400 {
+		t.Fatalf("rateGlobalUp = %d, want 102400", e.rateGlobalUp.rate.Load())
+	}
+	if got := e.stoppedRing.len(); got != 1 {
+		t.Fatalf("stopped ring len = %d, want 1", got)
+	}
+	stopped := e.TellStopped(0, 10)
+	if len(stopped) != 1 || stopped[0].GID != 0x12 {
+		t.Fatalf("TellStopped() = %#v, want newest entry only", stopped)
+	}
+	if e.stoppedTotal.Load() != 7 {
+		t.Fatalf("stoppedTotal = %d, want 7", e.stoppedTotal.Load())
+	}
+	if e.removedErrors.Load() != 1 {
+		t.Fatalf("removedErrors = %d, want 1", e.removedErrors.Load())
+	}
+	if got := core.ErrorCode(e.removedLastErr.Load()); got != core.ExitResourceNotFound {
+		t.Fatalf("removedLastErr = %v, want %v", got, core.ExitResourceNotFound)
+	}
+	select {
+	case <-e.queueWake:
+	default:
+		t.Fatal("queueWake was not signaled")
+	}
+}
+
 func TestSubscribe(t *testing.T) {
 	e, err := New(testOpts(), testLogger(t))
 	if err != nil {
@@ -668,6 +769,7 @@ func TestSubscribe(t *testing.T) {
 
 	result := e.Subscribe(sub.ch)
 	gid, _ := e.Add(AddSpec{URIs: []string{"http://example.com/file.iso"}})
+	e.fillRequestGroupFromReserver()
 	e.Remove(gid, false)
 
 	time.Sleep(10 * time.Millisecond)
@@ -778,6 +880,44 @@ func TestShutdown_DoubleCall(t *testing.T) {
 	}
 }
 
+func TestShutdown_ForceEscalatesGracefulRequest(t *testing.T) {
+	e, err := New(testOpts(), testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.ctx = ctx
+	e.cancel = cancel
+
+	gid := core.GID(1)
+	rg := &requestGroup{
+		gid:    gid,
+		state:  core.StatusActive,
+		cancel: func() {},
+	}
+	e.groups.set(gid, rg)
+	e.active = []core.GID{gid}
+
+	if err := e.Shutdown(false); err != nil {
+		t.Fatalf("Shutdown(false) error = %v", err)
+	}
+	if !rg.haltRequested {
+		t.Fatal("haltRequested = false, want true after graceful shutdown")
+	}
+	if rg.forceHaltReq {
+		t.Fatal("forceHaltReq = true after graceful shutdown, want false")
+	}
+
+	if err := e.Shutdown(true); err != nil {
+		t.Fatalf("Shutdown(true) escalation error = %v", err)
+	}
+	if !rg.forceHaltReq {
+		t.Fatal("forceHaltReq = false, want true after force escalation")
+	}
+}
+
 func TestShutdown_PreventsAdd(t *testing.T) {
 	e, err := New(testOpts(), testLogger(t))
 	if err != nil {
@@ -795,6 +935,76 @@ func TestShutdown_PreventsAdd(t *testing.T) {
 	_, err = e.Add(AddSpec{URIs: []string{"http://example.com/file.iso"}})
 	if err == nil {
 		t.Error("expected error adding after shutdown")
+	}
+}
+
+func TestRunStopTimerRequestsShutdown(t *testing.T) {
+	opts := testOpts()
+	opts.EnableRPC = true
+	opts.Stop = "1"
+	opts.Quiet = true
+
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Run(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Run() did not exit after --stop timer elapsed")
+	}
+
+	if !e.shuttingDown.Load() {
+		t.Fatal("expected stop timer to request shutdown")
+	}
+}
+
+func TestRunStopWithProcessRequestsShutdown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process watch semantics are Unix-focused in this test")
+	}
+
+	opts := testOpts()
+	opts.EnableRPC = true
+	opts.StopWithProcess = 999999999
+	opts.Quiet = true
+
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Run(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Run() did not exit after watched process disappeared")
+	}
+
+	if !e.shuttingDown.Load() {
+		t.Fatal("expected stop-with-process watcher to request shutdown")
 	}
 }
 
@@ -897,6 +1107,7 @@ func TestSessionID(t *testing.T) {
 func TestTellStopped_RemovedInStopped(t *testing.T) {
 	e, _ := New(testOpts(), testLogger(t))
 	gid, _ := e.Add(AddSpec{URIs: []string{"http://example.com/file.iso"}})
+	e.fillRequestGroupFromReserver()
 	e.Remove(gid, false)
 
 	s, err := e.TellStatus(gid)
@@ -1182,6 +1393,129 @@ func TestOnEndOfRun_CleansUpActiveAndWaiting(t *testing.T) {
 	}
 }
 
+func TestOnEndOfRun_ActiveShutdownCountsAsInProgress(t *testing.T) {
+	e, err := New(&config.Options{
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+		Dir:                    t.TempDir(),
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	gid, err := e.Add(AddSpec{URIs: []string{"http://example.com/active.iso"}})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	e.fillRequestGroupFromReserver()
+
+	if len(e.TellActive()) != 1 {
+		t.Fatalf("expected 1 active download before shutdown, got %d", len(e.TellActive()))
+	}
+
+	e.shuttingDown.Store(true)
+	e.onEndOfRun()
+
+	dr, ok := e.stoppedRing.getByGID(gid)
+	if !ok {
+		t.Fatalf("stopped result missing for gid %s", gid)
+	}
+	if dr.errCode != core.ExitInProgress {
+		t.Fatalf("shutdown errCode = %v, want %v", dr.errCode, core.ExitInProgress)
+	}
+	if got := e.ExitCode(); got != core.ExitUnfinishedDownloads {
+		t.Fatalf("ExitCode() = %v, want %v", got, core.ExitUnfinishedDownloads)
+	}
+}
+
+func TestExitCode_FallsBackToShutdownInProgressWhenStoppedRingIsEmpty(t *testing.T) {
+	e, err := New(&config.Options{
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+		Dir:                    t.TempDir(),
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := e.Add(AddSpec{URIs: []string{"http://example.com/active.iso"}}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	e.fillRequestGroupFromReserver()
+	e.shuttingDown.Store(true)
+	e.onEndOfRun()
+	e.stoppedRing.purge()
+
+	if got := e.ExitCode(); got != core.ExitUnfinishedDownloads {
+		t.Fatalf("ExitCode() after purging stopped ring = %v, want %v", got, core.ExitUnfinishedDownloads)
+	}
+}
+
+func TestExitCode_FallsBackToShutdownErrorWhenStoppedRingIsEmpty(t *testing.T) {
+	e, err := New(&config.Options{
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+		Dir:                    t.TempDir(),
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	gid, err := e.Add(AddSpec{URIs: []string{"http://example.com/active.iso"}})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	e.fillRequestGroupFromReserver()
+
+	rg, ok := e.groups.getLocked(gid)
+	if !ok {
+		t.Fatalf("group %s missing", gid)
+	}
+	rg.errCode = core.ExitNetworkProblem
+	rg.errMsg = "network failed"
+	e.groups.unlock(gid)
+
+	e.shuttingDown.Store(true)
+	e.onEndOfRun()
+	e.stoppedRing.purge()
+
+	if got := e.ExitCode(); got != core.ExitNetworkProblem {
+		t.Fatalf("ExitCode() after purging stopped ring = %v, want %v", got, core.ExitNetworkProblem)
+	}
+}
+
+func TestMarkTransferCanceledGracefulHaltLeavesResultUnspecified(t *testing.T) {
+	rg := &requestGroup{
+		haltRequested: true,
+		errCode:       core.ExitSuccess,
+		errMsg:        "old",
+	}
+
+	markTransferCanceled(rg)
+
+	if rg.errCode != 0 {
+		t.Fatalf("errCode = %v, want 0 for graceful halt", rg.errCode)
+	}
+	if rg.errMsg != "" {
+		t.Fatalf("errMsg = %q, want empty for graceful halt", rg.errMsg)
+	}
+}
+
+func TestMarkTransferCanceledRemovePreservesRemovedOutcome(t *testing.T) {
+	rg := &requestGroup{
+		forceHaltReq: true,
+	}
+
+	markTransferCanceled(rg)
+
+	if rg.errCode != core.ExitRemoved {
+		t.Fatalf("errCode = %v, want %v", rg.errCode, core.ExitRemoved)
+	}
+	if rg.errMsg != "download cancelled" {
+		t.Fatalf("errMsg = %q, want %q", rg.errMsg, "download cancelled")
+	}
+}
+
 func TestSaveSession_NoPath(t *testing.T) {
 	e, _ := New(testOpts(), testLogger(t))
 	if err := e.SaveSession(); err == nil {
@@ -1363,6 +1697,7 @@ func TestNumStopped(t *testing.T) {
 	}
 
 	gid, _ := e.Add(AddSpec{URIs: []string{"http://example.com/a"}})
+	e.fillRequestGroupFromReserver()
 	e.Remove(gid, false)
 
 	if n := e.NumStopped(); n != 1 {
@@ -1404,6 +1739,138 @@ func TestSaveSession_WithPath(t *testing.T) {
 	}
 }
 
+func TestSaveSession_EmptyQueueCreatesEmptyFileAndUpdatesHash(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "session.txt")
+	if err := os.WriteFile(sessionPath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("seed session file: %v", err)
+	}
+
+	e, _ := New(&config.Options{
+		MaxConcurrentDownloads: 5,
+		MaxDownloadResult:      10,
+		Dir:                    dir,
+		SaveSession:            sessionPath,
+	}, testLogger(t))
+
+	if err := e.SaveSession(); err != nil {
+		t.Fatalf("first SaveSession() error = %v", err)
+	}
+
+	data, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatalf("read session file: %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("session file len = %d, want 0", len(data))
+	}
+
+	wantHash, err := sessionfile.SerializedHash(nil)
+	if err != nil {
+		t.Fatalf("SerializedHash(nil): %v", err)
+	}
+	if !e.hasSessionHash {
+		t.Fatal("hasSessionHash = false, want true")
+	}
+	if e.lastSessionHash != wantHash {
+		t.Fatalf("lastSessionHash = %x, want %x", e.lastSessionHash, wantHash)
+	}
+
+	stat1, err := os.Stat(sessionPath)
+	if err != nil {
+		t.Fatalf("stat first session file: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := e.SaveSession(); err != nil {
+		t.Fatalf("second SaveSession() error = %v", err)
+	}
+	stat2, err := os.Stat(sessionPath)
+	if err != nil {
+		t.Fatalf("stat second session file: %v", err)
+	}
+	if !stat2.ModTime().Equal(stat1.ModTime()) {
+		t.Fatalf("empty SaveSession rewrote file: first=%s second=%s", stat1.ModTime(), stat2.ModTime())
+	}
+}
+
+func TestSaveSessionAfterShutdownPreservesActiveAndWaiting(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "session.txt")
+
+	e, err := New(&config.Options{
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+		Dir:                    dir,
+		SaveSession:            sessionPath,
+		EnableRPC:              true,
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := e.Add(AddSpec{
+		URIs:    []string{"http://example.com/active.iso"},
+		Options: &config.Options{Dir: dir, Out: "active.iso"},
+	}); err != nil {
+		t.Fatalf("Add(active) error = %v", err)
+	}
+	if _, err := e.Add(AddSpec{
+		URIs:    []string{"http://example.com/paused.iso"},
+		Options: &config.Options{Dir: dir, Out: "paused.iso", Pause: true},
+	}); err != nil {
+		t.Fatalf("Add(paused) error = %v", err)
+	}
+
+	e.fillRequestGroupFromReserver()
+	if len(e.TellActive()) != 1 {
+		t.Fatalf("expected 1 active download before shutdown snapshot")
+	}
+	if len(e.TellWaiting(0, 10)) != 1 {
+		t.Fatalf("expected 1 waiting download before shutdown snapshot")
+	}
+
+	e.shuttingDown.Store(true)
+	e.onEndOfRun()
+
+	if err := e.SaveSession(); err != nil {
+		t.Fatalf("SaveSession() error = %v", err)
+	}
+
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		t.Fatalf("open session file: %v", err)
+	}
+	defer f.Close()
+
+	entries, err := sessionfile.Read(f)
+	if err != nil {
+		t.Fatalf("sessionfile.Read() error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("saved entries = %d, want 2", len(entries))
+	}
+	if got := entries[0].URIs[0]; got != "http://example.com/active.iso" {
+		t.Fatalf("first saved entry = %q, want active URI first", got)
+	}
+	if got := entries[1].URIs[0]; got != "http://example.com/paused.iso" {
+		t.Fatalf("second saved entry = %q, want paused URI second", got)
+	}
+
+	seen := map[string]core.Status{}
+	for _, entry := range entries {
+		if len(entry.URIs) == 0 {
+			t.Fatalf("saved entry missing URIs: %+v", entry)
+		}
+		seen[entry.URIs[0]] = entry.Status
+	}
+	if seen["http://example.com/active.iso"] != core.StatusWaiting {
+		t.Fatalf("active shutdown entry status = %s, want waiting", seen["http://example.com/active.iso"])
+	}
+	if seen["http://example.com/paused.iso"] != core.StatusPaused {
+		t.Fatalf("paused shutdown entry status = %s, want paused", seen["http://example.com/paused.iso"])
+	}
+}
+
 func TestSaveSessionSkipsUnchangedSerializedContent(t *testing.T) {
 	dir := t.TempDir()
 	sessionPath := filepath.Join(dir, "session.txt")
@@ -1433,6 +1900,31 @@ func TestSaveSessionSkipsUnchangedSerializedContent(t *testing.T) {
 	}
 	if !stat2.ModTime().Equal(stat1.ModTime()) {
 		t.Fatalf("unchanged SaveSession rewrote file: first=%s second=%s", stat1.ModTime(), stat2.ModTime())
+	}
+}
+
+func TestRemoveWaitingDropsWithoutStoppedResult(t *testing.T) {
+	e, err := New(testOpts(), testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	gid, err := e.Add(AddSpec{URIs: []string{"http://example.com/waiting.iso"}})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	if err := e.Remove(gid, false); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if _, err := e.TellStatus(gid); err == nil {
+		t.Fatal("TellStatus() on removed waiting download unexpectedly succeeded")
+	}
+	if stopped := e.TellStopped(0, 10); len(stopped) != 0 {
+		t.Fatalf("TellStopped len = %d, want 0", len(stopped))
+	}
+	if got := e.NumStopped(); got != 0 {
+		t.Fatalf("NumStopped() = %d, want 0", got)
 	}
 }
 
@@ -1564,8 +2056,8 @@ func TestLoadInputFileReadsStdinDash(t *testing.T) {
 	if len(waiting) != 1 {
 		t.Fatalf("waiting entries = %d, want 1", len(waiting))
 	}
-	if len(waiting[0].Files) != 1 || waiting[0].Files[0].Path != "stdin.bin" {
-		t.Fatalf("waiting file status = %+v, want stdin.bin", waiting[0].Files)
+	if len(waiting[0].Files) != 1 || filepath.Base(waiting[0].Files[0].Path) != "stdin.bin" {
+		t.Fatalf("waiting file status = %+v, want basename stdin.bin", waiting[0].Files)
 	}
 }
 
@@ -1589,12 +2081,195 @@ func TestLoadInputFileExpandsParameterizedForceSequential(t *testing.T) {
 	if len(waiting) != 2 {
 		t.Fatalf("waiting entries = %d, want 2", len(waiting))
 	}
-	got := []string{waiting[0].Files[0].Path, waiting[1].Files[0].Path}
+	got := []string{filepath.Base(waiting[0].Files[0].Path), filepath.Base(waiting[1].Files[0].Path)}
 	want := []string{"asset-1.bin", "asset-2.bin"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("waiting paths = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestLoadInputFileSkipsUnrecognizedEntries(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "input.session")
+	data := "not-a-uri\nhttp://example.com/file.iso\n  dir=" + dir + "\n  out=file.iso\n"
+	if err := os.WriteFile(inputPath, []byte(data), 0644); err != nil {
+		t.Fatalf("write input file: %v", err)
+	}
+
+	e, err := New(testOpts(), testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := e.loadInputFile(inputPath); err != nil {
+		t.Fatalf("loadInputFile() error = %v", err)
+	}
+
+	waiting := e.TellWaiting(0, 10)
+	if len(waiting) != 1 {
+		t.Fatalf("waiting entries = %d, want 1", len(waiting))
+	}
+	if len(waiting[0].Files) != 1 || filepath.Base(waiting[0].Files[0].Path) != "file.iso" {
+		t.Fatalf("waiting file status = %+v, want basename file.iso", waiting[0].Files)
+	}
+}
+
+func TestLoadInputFileClassifiesLocalMetadataFiles(t *testing.T) {
+	dir := t.TempDir()
+	torrentPath := filepath.Join(dir, "single.torrent")
+	if err := os.WriteFile(torrentPath, testSingleFileTorrent(t, "payload.bin", 32), 0644); err != nil {
+		t.Fatalf("write torrent: %v", err)
+	}
+	metalinkPath := filepath.Join(dir, "fixture.meta4")
+	metalinkDoc := `<?xml version="1.0" encoding="utf-8"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>http://example.com/payload.bin</url></file></metalink>`
+	if err := os.WriteFile(metalinkPath, []byte(metalinkDoc), 0644); err != nil {
+		t.Fatalf("write metalink: %v", err)
+	}
+	inputPath := filepath.Join(dir, "input.session")
+	data := torrentPath + "\n" + metalinkPath + "\n"
+	if err := os.WriteFile(inputPath, []byte(data), 0644); err != nil {
+		t.Fatalf("write input file: %v", err)
+	}
+
+	e, err := New(testOpts(), testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := e.loadInputFile(inputPath); err != nil {
+		t.Fatalf("loadInputFile() error = %v", err)
+	}
+
+	waiting := e.TellWaiting(0, 10)
+	if len(waiting) != 2 {
+		t.Fatalf("waiting entries = %d, want 2", len(waiting))
+	}
+
+	var sawTorrent, sawMetalink bool
+	for _, status := range waiting {
+		rg, ok := e.groups.getLocked(status.GID)
+		if !ok {
+			t.Fatalf("requestGroup %s not found", status.GID)
+		}
+		if rg.metadataURI == torrentPath {
+			sawTorrent = len(rg.torrent) > 0 && len(rg.uris) == 0
+		}
+		if rg.metadataURI == metalinkPath {
+			sawMetalink = len(rg.metalinkData) > 0 && len(rg.uris) == 0
+		}
+		e.groups.unlock(status.GID)
+	}
+	if !sawTorrent {
+		t.Fatal("local torrent input entry was not classified as torrent metadata")
+	}
+	if !sawMetalink {
+		t.Fatal("local metalink input entry was not classified as metalink metadata")
+	}
+}
+
+func TestDeferredInputLoadsEntriesIncrementally(t *testing.T) {
+	e, err := New(&config.Options{
+		Dir:                    t.TempDir(),
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	parser, err := sessionfile.NewParser(strings.NewReader("http://example.com/one.iso\nhttp://example.com/two.iso\n"))
+	if err != nil {
+		t.Fatalf("NewParser() error = %v", err)
+	}
+	defer parser.Close()
+	e.inputParser = parser
+
+	e.fillRequestGroupFromReserver()
+
+	if len(e.active) != 1 {
+		t.Fatalf("active entries = %d, want 1", len(e.active))
+	}
+	if len(e.waiting) != 0 {
+		t.Fatalf("waiting entries = %d, want 0 after first deferred promotion", len(e.waiting))
+	}
+	if e.inputParser == nil {
+		t.Fatal("input parser should still contain deferred entries")
+	}
+	if _, ok := e.groups.get(e.active[0]); !ok {
+		t.Fatal("active deferred entry was not added to the engine")
+	}
+}
+
+func TestSaveSessionWritesExplicitRequestOptionsAndMetadataURI(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "session.txt")
+	torrentPath := filepath.Join(dir, "single.torrent")
+	if err := os.WriteFile(torrentPath, testSingleFileTorrent(t, "payload.bin", 32), 0644); err != nil {
+		t.Fatalf("write torrent: %v", err)
+	}
+
+	e, err := New(&config.Options{
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+		Dir:                    dir,
+		SaveSession:            sessionPath,
+		EnableRPC:              true,
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	localOpts := &config.Options{
+		Dir:              dir,
+		Out:              "payload.bin",
+		Pause:            true,
+		Header:           []string{"X-Test: one", "X-Test: two"},
+		MaxDownloadLimit: "2K",
+	}
+	for _, name := range []string{"dir", "out", "pause", "header", "max-download-limit"} {
+		localOpts.MarkExplicit(name)
+	}
+
+	if _, err := e.Add(AddSpec{
+		Torrent:     testSingleFileTorrent(t, "payload.bin", 32),
+		Options:     localOpts,
+		MetadataURI: torrentPath,
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	if err := e.SaveSession(); err != nil {
+		t.Fatalf("SaveSession() error = %v", err)
+	}
+
+	data, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatalf("read session file: %v", err)
+	}
+	out := string(data)
+	if !strings.HasPrefix(out, torrentPath+"\t\n") {
+		t.Fatalf("session file should start with metadata URI %q, got:\n%s", torrentPath, out)
+	}
+	for _, want := range []string{
+		" pause=true\n",
+		" dir=" + dir + "\n",
+		" out=payload.bin\n",
+		" header=X-Test: one\n",
+		" header=X-Test: two\n",
+		" max-download-limit=2048\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("session file missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, " save-session=") {
+		t.Fatalf("session file should not serialize global save-session option:\n%s", out)
+	}
+	if strings.Count(out, " gid=") != 1 {
+		t.Fatalf("gid line count = %d, want 1:\n%s", strings.Count(out, " gid="), out)
+	}
+	if strings.Count(out, " pause=true\n") != 1 {
+		t.Fatalf("pause line count = %d, want 1:\n%s", strings.Count(out, " pause=true\n"), out)
 	}
 }
 
@@ -1923,6 +2598,68 @@ func TestResolveProxyURI(t *testing.T) {
 		expected := "http://alice@proxy.example.com:8080"
 		if got != expected {
 			t.Errorf("resolveProxyURI(http user no pass) = %q, want %q", got, expected)
+		}
+	})
+}
+
+func TestResolveProxyURIForTargetHonorsNoProxy(t *testing.T) {
+	opts := &config.Options{
+		HTTPProxy: "http://proxy.example.com:8080",
+		NoProxy:   "example.com,.bypass.test,127.0.0.0/8",
+	}
+
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "exact host bypass", host: "example.com", want: ""},
+		{name: "exact host does not match subdomain", host: "www.example.com", want: "http://proxy.example.com:8080"},
+		{name: "domain suffix bypass", host: "api.bypass.test", want: ""},
+		{name: "cidr bypass", host: "127.0.0.1", want: ""},
+		{name: "non-match uses proxy", host: "other.test", want: "http://proxy.example.com:8080"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveProxyURIForTarget("http", tc.host, opts); got != tc.want {
+				t.Fatalf("resolveProxyURIForTarget(%q) = %q, want %q", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHTTPDriverForURINoProxyBypassesInvalidProxy(t *testing.T) {
+	opts := testOpts()
+	opts.HTTPProxy = "http://%"
+	opts.NoProxy = "example.com"
+
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := e.httpDriverForURI(nil, "http://example.com/file.iso"); err != nil {
+		t.Fatalf("httpDriverForURI() error = %v", err)
+	}
+}
+
+func TestResolveHTTPProxyMethod(t *testing.T) {
+	t.Run("http defaults to get", func(t *testing.T) {
+		if got := resolveHTTPProxyMethod("http", &config.Options{}); got != "get" {
+			t.Fatalf("resolveHTTPProxyMethod(http) = %q, want get", got)
+		}
+	})
+
+	t.Run("https always tunnels", func(t *testing.T) {
+		if got := resolveHTTPProxyMethod("https", &config.Options{}); got != "tunnel" {
+			t.Fatalf("resolveHTTPProxyMethod(https) = %q, want tunnel", got)
+		}
+	})
+
+	t.Run("explicit tunnel overrides http default", func(t *testing.T) {
+		if got := resolveHTTPProxyMethod("http", &config.Options{ProxyMethod: "tunnel"}); got != "tunnel" {
+			t.Fatalf("resolveHTTPProxyMethod(http tunnel) = %q, want tunnel", got)
 		}
 	})
 }
@@ -2938,7 +3675,7 @@ func TestRunDownloadMagnetMissingLocalTorrent(t *testing.T) {
 	if rg.errCode != core.ExitResourceNotFound {
 		t.Fatalf("errCode = %d, want resource-not-found", rg.errCode)
 	}
-	if !strings.Contains(rg.errMsg, "magnet link metadata download not supported") {
+	if rg.errMsg != "no peers available" {
 		t.Fatalf("errMsg = %q", rg.errMsg)
 	}
 	select {
@@ -2980,7 +3717,7 @@ func TestRunDownloadMagnetDoesNotLoadSavedMetadataWhenDisabled(t *testing.T) {
 	if rg.errCode != core.ExitResourceNotFound {
 		t.Fatalf("errCode = %d, want resource-not-found", rg.errCode)
 	}
-	if rg.errMsg != "magnet link metadata download not supported (local .torrent not found)" {
+	if rg.errMsg != "no peers available" {
 		t.Fatalf("errMsg = %q", rg.errMsg)
 	}
 }
@@ -3103,6 +3840,260 @@ func TestRunHTTPDownloadAlwaysResumeFalseRestartsWhenServerIgnoresRange(t *testi
 	defer mu.Unlock()
 	if len(ranges) != 2 || ranges[0] != "bytes=4-9" || ranges[1] != "" {
 		t.Fatalf("GET ranges = %v, want [bytes=4-9, empty]", ranges)
+	}
+}
+
+func TestRunHTTPDownloadMaxResumeFailureTriesSingleURIRestartsImmediately(t *testing.T) {
+	content := []byte("0123456789")
+	var mu sync.Mutex
+	var ranges []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		if r.Method == http.MethodHead {
+			return
+		}
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range"))
+		mu.Unlock()
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "file.bin")
+	partial := []byte("0123")
+	if err := os.WriteFile(outPath, partial, 0644); err != nil {
+		t.Fatalf("write partial file: %v", err)
+	}
+
+	opts := &config.Options{
+		Dir:                    dir,
+		Continue:               true,
+		AlwaysResume:           false,
+		MaxResumeFailureTries:  2,
+		Split:                  1,
+		UseHead:                true,
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+	}
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	rg := &requestGroup{gid: 1, opts: opts, filePath: outPath}
+
+	e.runHTTPDownload(context.Background(), rg, server.URL+"/file.bin", outPath)
+	if rg.errCode != core.ExitSuccess {
+		t.Fatalf("errCode = %d, errMsg = %q", rg.errCode, rg.errMsg)
+	}
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read restarted output: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("restarted output = %q, want %q", got, content)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"bytes=4-9", ""}
+	if len(ranges) != len(want) {
+		t.Fatalf("GET ranges = %v, want %v", ranges, want)
+	}
+	for i := range want {
+		if ranges[i] != want[i] {
+			t.Fatalf("GET ranges = %v, want %v", ranges, want)
+		}
+	}
+}
+
+func TestRunHTTPDownloadMaxResumeFailureTriesSingleURIProbeWithoutRangeSupportStillAttemptsResume(t *testing.T) {
+	content := []byte("0123456789")
+	var mu sync.Mutex
+	var ranges []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		if r.Method == http.MethodHead {
+			return
+		}
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range"))
+		mu.Unlock()
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "file.bin")
+	if err := os.WriteFile(outPath, content[:4], 0644); err != nil {
+		t.Fatalf("write partial file: %v", err)
+	}
+
+	opts := &config.Options{
+		Dir:                    dir,
+		Continue:               true,
+		AlwaysResume:           false,
+		MaxResumeFailureTries:  2,
+		Split:                  1,
+		UseHead:                false,
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+	}
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	rg := &requestGroup{gid: 1, opts: opts, filePath: outPath}
+
+	e.runHTTPDownload(context.Background(), rg, server.URL+"/file.bin", outPath)
+	if rg.errCode != core.ExitSuccess {
+		t.Fatalf("errCode = %d, errMsg = %q", rg.errCode, rg.errMsg)
+	}
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read restarted output: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("restarted output = %q, want %q", got, content)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"bytes=0-0", "bytes=4-9", ""}
+	if len(ranges) != len(want) {
+		t.Fatalf("GET ranges = %v, want %v", ranges, want)
+	}
+	for i := range want {
+		if ranges[i] != want[i] {
+			t.Fatalf("GET ranges = %v, want %v", ranges, want)
+		}
+	}
+}
+
+func TestRunHTTPDownloadRetriesGatewayTimeoutBeforeBody(t *testing.T) {
+	content := []byte("retry payload")
+	var mu sync.Mutex
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		if r.Method == http.MethodHead {
+			return
+		}
+		mu.Lock()
+		gets++
+		attempt := gets
+		mu.Unlock()
+		if attempt == 1 {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "retry.bin")
+	opts := &config.Options{
+		Dir:                    dir,
+		Split:                  1,
+		UseHead:                true,
+		MaxTries:               2,
+		RetryWait:              "0",
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+	}
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	rg := &requestGroup{gid: 1, opts: opts, filePath: outPath}
+
+	e.runHTTPDownload(context.Background(), rg, server.URL+"/retry.bin", outPath)
+	if rg.errCode != core.ExitSuccess {
+		t.Fatalf("errCode = %d, errMsg = %q", rg.errCode, rg.errMsg)
+	}
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("output = %q, want %q", got, content)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gets != 2 {
+		t.Fatalf("GET count = %d, want 2", gets)
+	}
+}
+
+func TestRunHTTPDownloadInflatedContentEncodingDisablesResumeAndSplit(t *testing.T) {
+	payload := []byte("inflated response payload")
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write(payload); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	var mu sync.Mutex
+	var ranges []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(compressed.Len()))
+		if r.Method == http.MethodHead {
+			return
+		}
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range"))
+		mu.Unlock()
+		_, _ = w.Write(compressed.Bytes())
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "gzip.bin")
+	if err := os.WriteFile(outPath, []byte("stale"), 0644); err != nil {
+		t.Fatalf("write stale file: %v", err)
+	}
+
+	opts := &config.Options{
+		Dir:                    dir,
+		Continue:               true,
+		Split:                  3,
+		MinSplitSize:           "1",
+		HTTPAcceptGzip:         true,
+		UseHead:                true,
+		MaxConcurrentDownloads: 1,
+		MaxDownloadResult:      10,
+	}
+	e, err := New(opts, testLogger(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	rg := &requestGroup{gid: 1, opts: opts, filePath: outPath}
+
+	e.runHTTPDownload(context.Background(), rg, server.URL+"/gzip.bin", outPath)
+	if rg.errCode != core.ExitSuccess {
+		t.Fatalf("errCode = %d, errMsg = %q", rg.errCode, rg.errMsg)
+	}
+	if rg.totalLength != 0 {
+		t.Fatalf("totalLength = %d, want 0 for inflated response", rg.totalLength)
+	}
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("output = %q, want %q", got, payload)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ranges) != 1 || ranges[0] != "" {
+		t.Fatalf("GET ranges = %v, want [\"\"]", ranges)
 	}
 }
 
@@ -3235,6 +4226,113 @@ func TestRunDownloadHTTPCancelKeepsControlProgress(t *testing.T) {
 	}
 	if len(info.Bitfield) != 1 || info.Bitfield[0]&0x80 == 0 {
 		t.Fatalf("Bitfield = %08b, want first 4-byte piece complete", info.Bitfield)
+	}
+}
+
+func TestRemoveStoppedGroup_PausedActiveRunsPauseHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook script uses POSIX shell")
+	}
+
+	content := []byte("abcdefgh")
+	server, firstChunkWritten, release := newBlockingHTTPServer(t, content, 4)
+	defer server.Close()
+	defer release()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "hooks.log")
+	hookPath := filepath.Join(dir, "pause-hook.sh")
+	script := fmt.Sprintf("#!/bin/sh\nprintf 'pause|%%s|%%s|%%s\\n' \"$1\" \"$2\" \"$3\" >> %q\n", logPath)
+	if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write hook script: %v", err)
+	}
+
+	e, rg, _, done := startHTTPRunDownload(t, dir, server.URL+"/file.bin", filepath.Join(dir, "file.bin"))
+	e.cfg.OnDownloadPause = hookPath
+
+	e.queuesMu.Lock()
+	e.active = append(e.active, rg.gid)
+	e.queuesMu.Unlock()
+
+	<-firstChunkWritten
+
+	if err := e.Pause(rg.gid, false); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled download to stop")
+	}
+
+	e.removeStoppedGroup()
+
+	status, err := e.TellStatus(rg.gid)
+	if err != nil {
+		t.Fatalf("TellStatus() error = %v", err)
+	}
+	if status.Status != core.StatusPaused {
+		t.Fatalf("status = %s, want paused", status.Status)
+	}
+
+	wantLine := fmt.Sprintf("pause|%s|1|%s", rg.gid.Hex(), rg.filePath)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(logPath)
+		if err == nil && strings.TrimSpace(string(data)) == wantLine {
+			break
+		}
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatalf("read hook log: %v", err)
+		}
+		if time.Now().After(deadline) {
+			data, _ := os.ReadFile(logPath)
+			t.Fatalf("hook log = %q, want %q", strings.TrimSpace(string(data)), wantLine)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRemoveStoppedGroup_UserRemovedActiveBecomesRemovedResult(t *testing.T) {
+	content := []byte("abcdefgh")
+	server, firstChunkWritten, release := newBlockingHTTPServer(t, content, 4)
+	defer server.Close()
+	defer release()
+
+	dir := t.TempDir()
+	e, rg, _, done := startHTTPRunDownload(t, dir, server.URL+"/file.bin", filepath.Join(dir, "file.bin"))
+
+	e.queuesMu.Lock()
+	e.active = append(e.active, rg.gid)
+	e.queuesMu.Unlock()
+
+	<-firstChunkWritten
+
+	if err := e.Remove(rg.gid, true); err != nil {
+		t.Fatalf("Remove(force) error = %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for force-removed download to stop")
+	}
+
+	e.removeStoppedGroup()
+
+	status, err := e.TellStatus(rg.gid)
+	if err != nil {
+		t.Fatalf("TellStatus() error = %v", err)
+	}
+	if status.Status != core.StatusRemoved {
+		t.Fatalf("status = %s, want removed", status.Status)
+	}
+	if status.ErrorCode != core.ExitRemoved {
+		t.Fatalf("errorCode = %d, want %d", status.ErrorCode, core.ExitRemoved)
+	}
+	if status.ErrorMessage != "" {
+		t.Fatalf("errorMessage = %q, want empty string", status.ErrorMessage)
 	}
 }
 
@@ -3438,7 +4536,7 @@ func TestDownloadToAdaptorContextCanceledReadReturnsCleanly(t *testing.T) {
 	}
 	rg := &requestGroup{gid: 1}
 
-	written := e.downloadToAdaptor(context.Background(), rg, &syncBeforeSaveAdaptor{}, canceledReadBody{}, 0)
+	written := e.downloadToAdaptor(context.Background(), rg, &syncBeforeSaveAdaptor{}, canceledReadBody{}, 0, nil)
 
 	if written != -1 {
 		t.Fatalf("written = %d, want -1", written)

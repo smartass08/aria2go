@@ -5,15 +5,20 @@ package cookies
 
 import (
 	"bufio"
+	"database/sql"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // sentinel value for session cookies (expiry=0 means never expires).
@@ -27,6 +32,12 @@ var cookiePool = sync.Pool{
 var cookieEntryPool = sync.Pool{
 	New: func() any { return &cookieEntry{} },
 }
+
+const sqliteFileHeader = "SQLite format 3\x00"
+
+const firefoxCookieQuery = "SELECT host, path, isSecure, expiry, name, value, lastAccessed FROM moz_cookies"
+
+const chromiumCookieQuery = "SELECT host_key, path, secure, expires_utc / 1000000 - 11644473600 as expires_utc, name, value, last_access_utc / 1000000 - 11644473600 as last_access_utc FROM cookies"
 
 type cookieEntry struct {
 	c            *http.Cookie
@@ -44,6 +55,30 @@ type Jar struct {
 // New returns a new empty Jar.
 func New() *Jar {
 	return &Jar{}
+}
+
+// LoadFile reads cookies from path. It accepts Netscape cookies.txt files and
+// Firefox/Chromium SQLite cookie databases, matching aria2's load-cookies
+// behavior.
+func (j *Jar) LoadFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	header := make([]byte, len(sqliteFileHeader))
+	n, err := io.ReadFull(f, header)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return err
+	}
+	if n == len(sqliteFileHeader) && string(header) == sqliteFileHeader {
+		return j.loadSQLite(path)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	return j.LoadNetscape(f)
 }
 
 // LoadNetscape reads Netscape-format cookies.txt from r.
@@ -126,6 +161,78 @@ func (j *Jar) LoadNetscape(r io.Reader) error {
 	}
 
 	return sc.Err()
+}
+
+func (j *Jar) loadSQLite(path string) error {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	entries, err := loadSQLiteEntries(db, firefoxCookieQuery)
+	if err != nil {
+		chromiumEntries, chromiumErr := loadSQLiteEntries(db, chromiumCookieQuery)
+		if chromiumErr != nil {
+			return fmt.Errorf("cookies: firefox query failed: %v; chromium query failed: %w", err, chromiumErr)
+		}
+		entries = chromiumEntries
+	}
+
+	j.mu.Lock()
+	j.entries = entries
+	j.mu.Unlock()
+	return nil
+}
+
+func loadSQLiteEntries(db *sql.DB, query string) ([]*cookieEntry, error) {
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*cookieEntry
+	for rows.Next() {
+		var host string
+		var path string
+		var secure int64
+		var expires int64
+		var name string
+		var value sql.NullString
+		var lastAccess int64
+		if err := rows.Scan(&host, &path, &secure, &expires, &name, &value, &lastAccess); err != nil {
+			return nil, err
+		}
+
+		domain := strings.TrimLeft(host, ".")
+		if domain == "" || name == "" || !goodPath(path) {
+			continue
+		}
+
+		hostOnly := isNumericHost(domain) || !strings.HasPrefix(host, ".")
+		if !hostOnly && !strings.HasPrefix(domain, ".") {
+			domain = "." + domain
+		}
+
+		c := cookiePool.Get().(*http.Cookie)
+		c.Name = name
+		c.Value = value.String
+		c.Path = path
+		c.Domain = domain
+		c.Secure = secure == 1
+		c.HttpOnly = false
+		c.Expires = time.Unix(expires, 0)
+
+		e := cookieEntryPool.Get().(*cookieEntry)
+		e.c = c
+		e.creationTime = time.Unix(lastAccess, 0)
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // goodPath requires the path to be non-empty and start with '/'.
@@ -314,7 +421,8 @@ func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 
 		// MaxAge handling
 		if c.MaxAge < 0 {
-			continue // delete immediately
+			j.entries = deleteCookie(j.entries, domain, path, c.Name)
+			continue
 		}
 		if c.MaxAge > 0 {
 			c.Expires = now.Add(time.Duration(c.MaxAge) * time.Second)

@@ -96,6 +96,9 @@ func writeEntry(w io.Writer, e *Entry) error {
 		if !emitKeys[key] {
 			continue
 		}
+		if written[key] {
+			continue
+		}
 		val, inOpts := e.Options[key]
 		if !inOpts {
 			continue

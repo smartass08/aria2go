@@ -2,8 +2,9 @@
 // servers.  ClientConfig builds a tls.Config for outbound connections;
 // ServerConfig builds a tls.Config for inbound connections.
 //
-// PKCS12 files are not supported by this package. Go's standard library does
-// not include PKCS12 parsing. Convert PKCS12 files to PEM format before use.
+// Client certificate files may be PEM or PKCS#12. PKCS#12 is used when a
+// certificate file is provided without a separate private key, matching aria2's
+// HTTPS client behavior.
 //
 // SSL_OP_SINGLE_ECDH_USE (OpenSSL option for single-use ECDH keys) is handled
 // automatically by Go TLS 1.3, which always generates ephemeral keys per
@@ -17,9 +18,12 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"strings"
+
+	"golang.org/x/crypto/pkcs12"
 )
 
 // ClientOpts holds parameters for building a client tls.Config.
@@ -28,7 +32,7 @@ import (
 type ClientOpts struct {
 	ServerName   string   // SNI hostname for certificate validation
 	CACerts      [][]byte // PEM-encoded CA certificates
-	ClientCert   []byte   // PEM client certificate
+	ClientCert   []byte   // PEM client certificate, or PKCS#12 when ClientKey is empty
 	ClientKey    []byte   // PEM client private key
 	SkipVerify   bool     // skips server certificate verification
 	Pinned       []byte   // DER-encoded pinned server leaf certificate
@@ -40,7 +44,7 @@ type ClientOpts struct {
 
 // ServerOpts holds parameters for building a server tls.Config.
 type ServerOpts struct {
-	CertFile     string             // path to PEM certificate file
+	CertFile     string             // path to PEM certificate file, or PKCS#12 when KeyFile is empty
 	KeyFile      string             // path to PEM private key file
 	ClientAuth   tls.ClientAuthType // client certificate authentication mode
 	ClientCAs    [][]byte           // PEM-encoded CA certificates for verifying peer clients
@@ -110,12 +114,12 @@ func ClientConfig(opts ClientOpts) (*tls.Config, error) {
 		cfg.RootCAs = pool
 	}
 
-	if (len(opts.ClientCert) > 0) != (len(opts.ClientKey) > 0) {
+	if len(opts.ClientKey) > 0 && len(opts.ClientCert) == 0 {
 		return nil, fmt.Errorf("tlsx: client certificate and key must be provided together")
 	}
 
 	if len(opts.ClientCert) > 0 {
-		cert, err := tls.X509KeyPair(opts.ClientCert, opts.ClientKey)
+		cert, err := loadClientCertificate(opts.ClientCert, opts.ClientKey)
 		if err != nil {
 			return nil, fmt.Errorf("tlsx: failed to load client certificate: %w", err)
 		}
@@ -149,12 +153,7 @@ func ServerConfig(opts ServerOpts) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tlsx: failed to read certificate file %q: %w", opts.CertFile, err)
 	}
-	keyPEM, err := os.ReadFile(opts.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("tlsx: failed to read key file %q: %w", opts.KeyFile, err)
-	}
-
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	cert, err := loadServerCertificate(certPEM, opts.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("tlsx: failed to load server certificate: %w", err)
 	}
@@ -198,4 +197,49 @@ func systemCertPool() *x509.CertPool {
 		return nil
 	}
 	return pool
+}
+
+func loadClientCertificate(certData, keyData []byte) (tls.Certificate, error) {
+	if len(keyData) > 0 {
+		return tls.X509KeyPair(certData, keyData)
+	}
+	return loadPKCS12Certificate(certData)
+}
+
+func loadServerCertificate(certData []byte, keyFile string) (tls.Certificate, error) {
+	if keyFile != "" {
+		keyData, err := os.ReadFile(keyFile)
+		if err != nil {
+			return tls.Certificate{}, fmt.Errorf("tlsx: failed to read key file %q: %w", keyFile, err)
+		}
+		return tls.X509KeyPair(certData, keyData)
+	}
+	return loadPKCS12Certificate(certData)
+}
+
+func loadPKCS12Certificate(p12Data []byte) (tls.Certificate, error) {
+	blocks, err := pkcs12.ToPEM(p12Data, "")
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	var certPEM []byte
+	var keyPEM []byte
+	for _, block := range blocks {
+		if block == nil {
+			continue
+		}
+		switch {
+		case strings.Contains(block.Type, "PRIVATE KEY"):
+			if len(keyPEM) == 0 {
+				keyPEM = pem.EncodeToMemory(block)
+			}
+		case strings.Contains(block.Type, "CERTIFICATE"):
+			certPEM = append(certPEM, pem.EncodeToMemory(block)...)
+		}
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		return tls.Certificate{}, fmt.Errorf("tlsx: PKCS#12 file missing certificate or private key")
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
