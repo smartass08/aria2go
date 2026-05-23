@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRPCParity_UploadedMetadataSavedToSession(t *testing.T) {
@@ -78,6 +80,164 @@ func TestRPCParity_UploadedMetadataSavedToSession(t *testing.T) {
 			assertSessionContains(t, refSession, wantRef)
 			assertSessionContains(t, implSession, wantImpl)
 		})
+	}
+}
+
+func TestRPCParity_StoppedResultFidelityHTTP(t *testing.T) {
+	SkipIfNoRef(t)
+
+	fileSrv := newBlockingDownloadServer(t)
+	root := t.TempDir()
+	refDir := filepath.Join(root, "ref")
+	implDir := filepath.Join(root, "impl")
+	if err := os.MkdirAll(refDir, 0o755); err != nil {
+		t.Fatalf("mkdir ref dir: %v", err)
+	}
+	if err := os.MkdirAll(implDir, 0o755); err != nil {
+		t.Fatalf("mkdir impl dir: %v", err)
+	}
+
+	refPort, implPort := startRPCPairFocused(t,
+		[]string{"--no-conf", "--dir=" + refDir, "--split=1", "--max-connection-per-server=1", "--allow-overwrite=true", "--auto-file-renaming=false"},
+		[]string{"--no-conf", "--dir=" + implDir, "--split=1", "--max-connection-per-server=1", "--allow-overwrite=true", "--auto-file-renaming=false"},
+	)
+
+	const gid = "0000000000000f51"
+	uri := fileSrv.URL + "/stopped-http.bin"
+	params := []any{[]string{uri}, map[string]string{"gid": gid}}
+	if got := rpcResultString(t, rpcCallOK(t, refPort, "aria2.addUri", params)); got != gid {
+		t.Fatalf("ref addUri gid got %q want %q", got, gid)
+	}
+	if got := rpcResultString(t, rpcCallOK(t, implPort, "aria2.addUri", params)); got != gid {
+		t.Fatalf("impl addUri gid got %q want %q", got, gid)
+	}
+
+	waitForRPCStatus(t, refPort, gid, "active")
+	waitForRPCStatus(t, implPort, gid, "active")
+	waitForRPCStringFieldFocused(t, refPort, gid, "totalLength", "1048576")
+	waitForRPCStringFieldFocused(t, implPort, gid, "totalLength", "1048576")
+
+	if got := rpcResultString(t, rpcCallOK(t, refPort, "aria2.remove", []any{gid})); got != gid {
+		t.Fatalf("ref remove gid got %q want %q", got, gid)
+	}
+	if got := rpcResultString(t, rpcCallOK(t, implPort, "aria2.remove", []any{gid})); got != gid {
+		t.Fatalf("impl remove gid got %q want %q", got, gid)
+	}
+	waitForRPCStatus(t, refPort, gid, "removed")
+	waitForRPCStatus(t, implPort, gid, "removed")
+
+	keys := []string{"gid", "status", "errorCode", "totalLength", "completedLength", "uploadLength", "downloadSpeed", "uploadSpeed", "connections", "bitfield", "pieceLength", "numPieces", "files", "dir"}
+	refStatus := rpcCallOK(t, refPort, "aria2.tellStatus", []any{gid, keys})
+	implStatus := rpcCallOK(t, implPort, "aria2.tellStatus", []any{gid, keys})
+	refStatusMap := mustJSONMap(t, "ref stopped http tellStatus", refStatus.Result)
+	implStatusMap := mustJSONMap(t, "impl stopped http tellStatus", implStatus.Result)
+	requireJSONFieldsFocused(t, "ref stopped http tellStatus", refStatusMap, keys)
+	requireJSONFieldsFocused(t, "impl stopped http tellStatus", implStatusMap, keys)
+	requireStoppedHTTPFilesFocused(t, "ref stopped http tellStatus.files", refStatusMap["files"])
+	requireStoppedHTTPFilesFocused(t, "impl stopped http tellStatus.files", implStatusMap["files"])
+
+	replacements := rpcParityReplacementsFocused(t, refDir, implDir, gid, gid)
+	compareJSONValueEqual(t, "stopped http tellStatus", normalizeJSONFocused(t, "ref stopped http tellStatus", refStatus.Result, replacements), normalizeJSONFocused(t, "impl stopped http tellStatus", implStatus.Result, replacements))
+
+	refStopped := rpcCallOK(t, refPort, "aria2.tellStopped", []any{float64(0), float64(1), keys})
+	implStopped := rpcCallOK(t, implPort, "aria2.tellStopped", []any{float64(0), float64(1), keys})
+	refStoppedEntries := mustJSONListFocused(t, "ref stopped http tellStopped", refStopped.Result)
+	implStoppedEntries := mustJSONListFocused(t, "impl stopped http tellStopped", implStopped.Result)
+	if len(refStoppedEntries) != 1 || len(implStoppedEntries) != 1 {
+		t.Fatalf("tellStopped entry lengths: ref=%d impl=%d, want 1/1", len(refStoppedEntries), len(implStoppedEntries))
+	}
+	compareJSONValueEqual(t, "stopped http tellStopped", normalizeJSONFocused(t, "ref stopped http tellStopped", refStoppedEntries[0], replacements), normalizeJSONFocused(t, "impl stopped http tellStopped", implStoppedEntries[0], replacements))
+	compareJSONValueEqual(t, "ref stopped http tellStopped mirrors tellStatus", normalizeJSONFocused(t, "ref stopped http tellStatus", refStatus.Result, replacements), normalizeJSONFocused(t, "ref stopped http tellStopped", refStoppedEntries[0], replacements))
+	compareJSONValueEqual(t, "impl stopped http tellStopped mirrors tellStatus", normalizeJSONFocused(t, "impl stopped http tellStatus", implStatus.Result, replacements), normalizeJSONFocused(t, "impl stopped http tellStopped", implStoppedEntries[0], replacements))
+
+	refGetFiles := rpcCallOK(t, refPort, "aria2.getFiles", []any{gid})
+	implGetFiles := rpcCallOK(t, implPort, "aria2.getFiles", []any{gid})
+	compareJSONValueEqual(t, "stopped http getFiles", normalizeJSONFocused(t, "ref stopped http getFiles", refGetFiles.Result, replacements), normalizeJSONFocused(t, "impl stopped http getFiles", implGetFiles.Result, replacements))
+	compareJSONValueEqual(t, "ref stopped http getFiles mirrors tellStatus.files", normalizeJSONFocused(t, "ref stopped http tellStatus.files", refStatusMap["files"], replacements), normalizeJSONFocused(t, "ref stopped http getFiles", refGetFiles.Result, replacements))
+	compareJSONValueEqual(t, "impl stopped http getFiles mirrors tellStatus.files", normalizeJSONFocused(t, "impl stopped http tellStatus.files", implStatusMap["files"], replacements), normalizeJSONFocused(t, "impl stopped http getFiles", implGetFiles.Result, replacements))
+}
+
+func TestRPCParity_StoppedResultFidelityBittorrent(t *testing.T) {
+	SkipIfNoRef(t)
+
+	root := t.TempDir()
+	refDir := filepath.Join(root, "ref")
+	implDir := filepath.Join(root, "impl")
+	if err := os.MkdirAll(refDir, 0o755); err != nil {
+		t.Fatalf("mkdir ref dir: %v", err)
+	}
+	if err := os.MkdirAll(implDir, 0o755); err != nil {
+		t.Fatalf("mkdir impl dir: %v", err)
+	}
+
+	refPort, implPort := startRPCPairFocused(t,
+		[]string{"--no-conf", "--dir=" + refDir, "--enable-dht=false", "--bt-enable-lpd=false", "--bt-tracker-connect-timeout=1", "--bt-tracker-timeout=1"},
+		[]string{"--no-conf", "--dir=" + implDir, "--enable-dht=false", "--bt-enable-lpd=false", "--bt-tracker-connect-timeout=1", "--bt-tracker-timeout=1"},
+	)
+
+	payload := base64.StdEncoding.EncodeToString(readFixtureFocused(t, "internal/torrent/testdata/single.torrent"))
+	params := []any{payload, []string{}, map[string]string{"pause": "false"}}
+	refGID := requireRPCGIDResult(t, "ref addTorrent", rpcCallOK(t, refPort, "aria2.addTorrent", params))
+	implGID := requireRPCGIDResult(t, "impl addTorrent", rpcCallOK(t, implPort, "aria2.addTorrent", params))
+
+	waitForRPCStatus(t, refPort, refGID, "active")
+	waitForRPCStatus(t, implPort, implGID, "active")
+
+	refRemove := rpcCallOK(t, refPort, "aria2.remove", []any{refGID})
+	implRemove := rpcCallOK(t, implPort, "aria2.remove", []any{implGID})
+	if got := rpcResultString(t, refRemove); got != refGID {
+		t.Fatalf("ref remove gid got %q want %q", got, refGID)
+	}
+	if got := rpcResultString(t, implRemove); got != implGID {
+		t.Fatalf("impl remove gid got %q want %q", got, implGID)
+	}
+
+	waitForRPCStatus(t, refPort, refGID, "removed")
+	waitForRPCStatus(t, implPort, implGID, "removed")
+
+	keys := []string{"status", "infoHash", "bittorrent", "files", "bitfield", "pieceLength", "numPieces", "totalLength", "completedLength"}
+	refStatus := rpcCallOK(t, refPort, "aria2.tellStatus", []any{refGID, keys})
+	implStatus := rpcCallOK(t, implPort, "aria2.tellStatus", []any{implGID, keys})
+	refMap := mustJSONMap(t, "ref stopped torrent status", refStatus.Result)
+	implMap := mustJSONMap(t, "impl stopped torrent status", implStatus.Result)
+
+	assertJSONFieldEqualFocused(t, "stopped torrent status", refMap, implMap, "status")
+	assertJSONFieldEqualFocused(t, "stopped torrent infoHash", refMap, implMap, "infoHash")
+	for _, key := range []string{"bitfield", "pieceLength", "numPieces", "totalLength", "completedLength"} {
+		assertJSONFieldEqualFocused(t, "stopped torrent "+key, refMap, implMap, key)
+	}
+	replacements := rpcParityReplacementsFocused(t, refDir, implDir, refGID, implGID)
+	assertNormalizedJSONFieldEqualFocused(t, "stopped torrent files", refMap, implMap, "files", replacements)
+	requireStoppedTorrentFilesFocused(t, "ref stopped torrent files", refMap["files"])
+	requireStoppedTorrentFilesFocused(t, "impl stopped torrent files", implMap["files"])
+
+	refStopped := rpcCallOK(t, refPort, "aria2.tellStopped", []any{float64(0), float64(1), keys})
+	implStopped := rpcCallOK(t, implPort, "aria2.tellStopped", []any{float64(0), float64(1), keys})
+	refStoppedEntries := mustJSONListFocused(t, "ref stopped torrent tellStopped", refStopped.Result)
+	implStoppedEntries := mustJSONListFocused(t, "impl stopped torrent tellStopped", implStopped.Result)
+	if len(refStoppedEntries) != 1 || len(implStoppedEntries) != 1 {
+		t.Fatalf("torrent tellStopped entry lengths: ref=%d impl=%d, want 1/1", len(refStoppedEntries), len(implStoppedEntries))
+	}
+	compareJSONValueEqual(t, "stopped torrent tellStopped", normalizeJSONFocused(t, "ref stopped torrent tellStopped", refStoppedEntries[0], replacements), normalizeJSONFocused(t, "impl stopped torrent tellStopped", implStoppedEntries[0], replacements))
+	compareJSONValueEqual(t, "ref stopped torrent tellStopped mirrors tellStatus", normalizeJSONFocused(t, "ref stopped torrent tellStatus", refStatus.Result, replacements), normalizeJSONFocused(t, "ref stopped torrent tellStopped", refStoppedEntries[0], replacements))
+	compareJSONValueEqual(t, "impl stopped torrent tellStopped mirrors tellStatus", normalizeJSONFocused(t, "impl stopped torrent tellStatus", implStatus.Result, replacements), normalizeJSONFocused(t, "impl stopped torrent tellStopped", implStoppedEntries[0], replacements))
+
+	refGetFiles := rpcCallOK(t, refPort, "aria2.getFiles", []any{refGID})
+	implGetFiles := rpcCallOK(t, implPort, "aria2.getFiles", []any{implGID})
+	compareJSONValueEqual(t, "stopped torrent getFiles", normalizeJSONFocused(t, "ref stopped torrent getFiles", refGetFiles.Result, replacements), normalizeJSONFocused(t, "impl stopped torrent getFiles", implGetFiles.Result, replacements))
+	compareJSONValueEqual(t, "ref stopped torrent getFiles mirrors tellStatus.files", normalizeJSONFocused(t, "ref stopped torrent tellStatus.files", refMap["files"], replacements), normalizeJSONFocused(t, "ref stopped torrent getFiles", refGetFiles.Result, replacements))
+	compareJSONValueEqual(t, "impl stopped torrent getFiles mirrors tellStatus.files", normalizeJSONFocused(t, "impl stopped torrent tellStatus.files", implMap["files"], replacements), normalizeJSONFocused(t, "impl stopped torrent getFiles", implGetFiles.Result, replacements))
+
+	refBT := requireJSONMapFieldFocused(t, "ref stopped torrent status", refMap, "bittorrent")
+	implBT := requireJSONMapFieldFocused(t, "impl stopped torrent status", implMap, "bittorrent")
+	compareJSONValueEqual(t, "stopped torrent bittorrent", refMap["bittorrent"], implMap["bittorrent"])
+
+	assertJSONFieldEqualFocused(t, "stopped torrent bittorrent.announceList", refBT, implBT, "announceList")
+	refInfo := requireJSONMapFieldFocused(t, "ref stopped torrent bittorrent", refBT, "info")
+	implInfo := requireJSONMapFieldFocused(t, "impl stopped torrent bittorrent", implBT, "info")
+	assertJSONFieldEqualFocused(t, "stopped torrent bittorrent.info.name", refInfo, implInfo, "name")
+	for _, key := range []string{"comment", "creationDate", "mode"} {
+		assertOptionalJSONFieldEqualFocused(t, "stopped torrent bittorrent", refBT, implBT, key)
 	}
 }
 
@@ -290,6 +450,216 @@ func gidListResultFocused(t *testing.T, rr rpcResponse) []string {
 		t.Fatalf("unmarshal gid list: %v", err)
 	}
 	return gids
+}
+
+func waitForRPCStringFieldFocused(t *testing.T, port int, gid string, key string, want string) {
+	t.Helper()
+
+	var last map[string]string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rr := rpcCall(t, port, "aria2.tellStatus", []any{gid, []string{key}})
+		if rr.Error == nil {
+			values := mustStringMap(t, "tellStatus "+key, rr.Result)
+			last = values
+			if values[key] == want {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("GID %s on port %d did not reach %s=%q; last=%v", gid, port, key, want, last)
+}
+
+func requireJSONFieldsFocused(t *testing.T, label string, values map[string]json.RawMessage, keys []string) {
+	t.Helper()
+
+	for _, key := range keys {
+		if _, ok := values[key]; !ok {
+			t.Fatalf("%s missing %q key; keys=%v", label, key, mapKeys(values))
+		}
+	}
+}
+
+func requireStoppedHTTPFilesFocused(t *testing.T, label string, raw json.RawMessage) {
+	t.Helper()
+
+	files := mustJSONMapSliceFocused(t, label, raw)
+	if len(files) != 1 {
+		t.Fatalf("%s len = %d, want 1", label, len(files))
+	}
+	requireJSONFieldsFocused(t, label+"[0]", files[0], []string{"index", "path", "length", "completedLength", "selected", "uris"})
+	if got := mustJSONStringFocused(t, label+"[0].length", files[0]["length"]); got != "1048576" {
+		t.Fatalf("%s[0].length = %q, want 1048576", label, got)
+	}
+	uris := mustJSONMapSliceFocused(t, label+"[0].uris", files[0]["uris"])
+	if len(uris) != 2 {
+		t.Fatalf("%s[0].uris len = %d, want 2", label, len(uris))
+	}
+	if got := mustJSONStringFocused(t, label+"[0].uris[0].status", uris[0]["status"]); got != "used" {
+		t.Fatalf("%s[0].uris[0].status = %q, want used", label, got)
+	}
+	if got := mustJSONStringFocused(t, label+"[0].uris[1].status", uris[1]["status"]); got != "waiting" {
+		t.Fatalf("%s[0].uris[1].status = %q, want waiting", label, got)
+	}
+}
+
+func requireStoppedTorrentFilesFocused(t *testing.T, label string, raw json.RawMessage) {
+	t.Helper()
+
+	files := mustJSONMapSliceFocused(t, label, raw)
+	if len(files) == 0 {
+		t.Fatalf("%s empty; want at least one file", label)
+	}
+	for i, file := range files {
+		requireJSONFieldsFocused(t, fmt.Sprintf("%s[%d]", label, i), file, []string{"index", "path", "length", "completedLength", "selected", "uris"})
+	}
+}
+
+func mustJSONListFocused(t *testing.T, label string, raw json.RawMessage) []json.RawMessage {
+	t.Helper()
+
+	var values []json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		t.Fatalf("unmarshal %s list: %v (raw=%s)", label, err, string(raw))
+	}
+	return values
+}
+
+func mustJSONMapSliceFocused(t *testing.T, label string, raw json.RawMessage) []map[string]json.RawMessage {
+	t.Helper()
+
+	var values []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		t.Fatalf("unmarshal %s object list: %v (raw=%s)", label, err, string(raw))
+	}
+	return values
+}
+
+func mustJSONStringFocused(t *testing.T, label string, raw json.RawMessage) string {
+	t.Helper()
+
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("unmarshal %s string: %v (raw=%s)", label, err, string(raw))
+	}
+	return value
+}
+
+func requireJSONMapFieldFocused(t *testing.T, label string, values map[string]json.RawMessage, key string) map[string]json.RawMessage {
+	t.Helper()
+
+	raw, ok := values[key]
+	if !ok {
+		t.Fatalf("%s missing %q key; keys=%v", label, key, mapKeys(values))
+	}
+	return mustJSONMap(t, label+"."+key, raw)
+}
+
+func assertJSONFieldEqualFocused(t *testing.T, label string, ref, impl map[string]json.RawMessage, key string) {
+	t.Helper()
+
+	refRaw, ok := ref[key]
+	if !ok {
+		t.Fatalf("ref %s missing %q key; keys=%v", label, key, mapKeys(ref))
+	}
+	implRaw, ok := impl[key]
+	if !ok {
+		t.Fatalf("impl %s missing %q key; keys=%v", label, key, mapKeys(impl))
+	}
+	compareJSONValueEqual(t, label, refRaw, implRaw)
+}
+
+func assertNormalizedJSONFieldEqualFocused(t *testing.T, label string, ref, impl map[string]json.RawMessage, key string, replacements map[string]string) {
+	t.Helper()
+
+	refRaw, ok := ref[key]
+	if !ok {
+		t.Fatalf("ref %s missing %q key; keys=%v", label, key, mapKeys(ref))
+	}
+	implRaw, ok := impl[key]
+	if !ok {
+		t.Fatalf("impl %s missing %q key; keys=%v", label, key, mapKeys(impl))
+	}
+	compareJSONValueEqual(t, label, normalizeJSONFocused(t, "ref "+label, refRaw, replacements), normalizeJSONFocused(t, "impl "+label, implRaw, replacements))
+}
+
+func assertOptionalJSONFieldEqualFocused(t *testing.T, label string, ref, impl map[string]json.RawMessage, key string) {
+	t.Helper()
+
+	if _, ok := ref[key]; ok {
+		assertJSONFieldEqualFocused(t, label+"."+key, ref, impl, key)
+	}
+}
+
+func rpcParityReplacementsFocused(t *testing.T, refDir, implDir, refGID, implGID string) map[string]string {
+	t.Helper()
+
+	replacements := map[string]string{}
+	addPathReplacementFocused(t, replacements, refDir, "<DIR>")
+	addPathReplacementFocused(t, replacements, implDir, "<DIR>")
+	if refGID != "" {
+		replacements[refGID] = "<GID>"
+	}
+	if implGID != "" {
+		replacements[implGID] = "<GID>"
+	}
+	return replacements
+}
+
+func addPathReplacementFocused(t *testing.T, replacements map[string]string, path string, value string) {
+	t.Helper()
+
+	if path == "" {
+		return
+	}
+	replacements[path] = value
+	cleaned := filepath.Clean(path)
+	replacements[cleaned] = value
+	if evaluated, err := filepath.EvalSymlinks(path); err == nil {
+		replacements[evaluated] = value
+		replacements[filepath.Clean(evaluated)] = value
+	}
+}
+
+func normalizeJSONFocused(t *testing.T, label string, raw json.RawMessage, replacements map[string]string) json.RawMessage {
+	t.Helper()
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("unmarshal %s for normalization: %v (raw=%s)", label, err, string(raw))
+	}
+	normalized := normalizeJSONValueFocused(value, replacements)
+	out, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatalf("marshal normalized %s: %v", label, err)
+	}
+	return out
+}
+
+func normalizeJSONValueFocused(value any, replacements map[string]string) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			out[key] = normalizeJSONValueFocused(child, replacements)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = normalizeJSONValueFocused(child, replacements)
+		}
+		return out
+	case string:
+		out := v
+		for old, replacement := range replacements {
+			out = strings.ReplaceAll(out, old, replacement)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func addPausedURIFocused(t *testing.T, port int, gid string, uri string) {

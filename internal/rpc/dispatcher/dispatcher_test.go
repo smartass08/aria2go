@@ -106,6 +106,27 @@ func waitForDispatcherStatus(t *testing.T, d *Dispatcher, gid, want string) {
 	t.Fatalf("timed out waiting for status %q for gid %s", want, gid)
 }
 
+func waitForDispatcherTotalLength(t *testing.T, d *Dispatcher, gid, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var last interface{}
+	for time.Now().Before(deadline) {
+		result, err := d.Call(context.Background(), "", "aria2.tellStatus", []interface{}{gid})
+		if err == nil {
+			status, ok := result.(map[string]interface{})
+			if ok {
+				last = status["totalLength"]
+				if last == want {
+					return
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for totalLength %q for gid %s; last=%v", want, gid, last)
+}
+
 func requireMulticallJSONFault(t *testing.T, elem interface{}, wantMessage string) {
 	t.Helper()
 	fault, ok := elem.(map[string]interface{})
@@ -969,6 +990,7 @@ func TestGetFiles_StoppedDownload(t *testing.T) {
 	})
 	gid := addResult.(string)
 	waitForDispatcherStatus(t, d, gid, "active")
+	waitForDispatcherTotalLength(t, d, gid, "1048576")
 	if _, err := d.Call(context.Background(), "", "aria2.remove", []interface{}{gid}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
@@ -992,11 +1014,14 @@ func TestGetFiles_StoppedDownload(t *testing.T) {
 	if !ok {
 		t.Fatalf("stopped file uris type = %T, want []map[string]interface{}", files[0]["uris"])
 	}
-	if len(uris) != 1 {
-		t.Fatalf("len(stopped uris) = %d, want 1 (%v)", len(uris), uris)
+	if len(uris) != 2 {
+		t.Fatalf("len(stopped uris) = %d, want 2 (%v)", len(uris), uris)
 	}
 	if uris[0]["status"] != "used" {
-		t.Fatalf("stopped uri statuses = %v, want [used]", uris)
+		t.Fatalf("stopped uri statuses = %v, first want used", uris)
+	}
+	if uris[1]["status"] != "waiting" {
+		t.Fatalf("stopped uri statuses = %v, second want waiting", uris)
 	}
 }
 

@@ -128,6 +128,7 @@ func TestProtocol_FTPReuseConnectionTwoFileParity(t *testing.T) {
 			"--bt-enable-lpd=false",
 			"--ftp-reuse-connection=true",
 			"--max-connection-per-server=1",
+			"--max-concurrent-downloads=1",
 			"--split=1",
 			"--ftp-pasv=true",
 			"--input-file=" + inputFile,

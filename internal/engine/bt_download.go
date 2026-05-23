@@ -670,7 +670,8 @@ func (e *Engine) runBTDownload(ctx context.Context, rg *requestGroup, torrentDat
 		rg.errMsg = err.Error()
 		return err
 	}
-	rg.btInfoHash = fmt.Sprintf("%x", infoHash[:])
+	rg.cacheBTStatusMetadata(meta, rg.opts)
+	rg.btMeta.Store(meta)
 
 	dir := rg.opts.Dir
 	if dir == "" {
@@ -884,7 +885,12 @@ func (e *Engine) runBTDownload(ctx context.Context, rg *requestGroup, torrentDat
 	buildTrackerReq := func(event string, numWant int, trackerID string) tracker.AnnounceRequest {
 		return e.buildTrackerRequest(meta, infoHash, rg, swarm, event, numWant, trackerID)
 	}
-	trackerSession := newBTTrackerSession(meta, rg.opts)
+	var trackerSession *btTrackerSession
+	if btMeta := rg.btStatusMeta.Load(); btMeta != nil {
+		trackerSession = newBTTrackerSessionFromTiers(btMeta.announceList, rg.opts)
+	} else {
+		trackerSession = newBTTrackerSession(meta, rg.opts)
+	}
 	webSeeds := btWebSeedFiles(meta, rg.uris)
 	announceStopped := func() {
 		if trackerSession == nil {

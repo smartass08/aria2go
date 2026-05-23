@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/smartass08/aria2go/internal/config"
+	"github.com/smartass08/aria2go/internal/core"
 	btpeer "github.com/smartass08/aria2go/internal/protocol/bittorrent/peer"
 	"github.com/smartass08/aria2go/internal/torrent"
 	"github.com/smartass08/aria2go/internal/tracker"
@@ -49,6 +50,57 @@ func TestBTTrackerSessionCompletedAnnounceUsesCompletedEvent(t *testing.T) {
 	}
 	if gotEvent != "completed" {
 		t.Fatalf("announceCompleted() event = %q, want completed", gotEvent)
+	}
+}
+
+func TestBTTrackerSessionFromCachedAnnounceTiersIgnoresLaterTrackerOptionChanges(t *testing.T) {
+	data := testRPCStatusTorrent(t, "payload.bin", "", [][]string{
+		{"udp://tracker1.example/announce", "udp://tracker2.example/announce"},
+		{"https://tracker3.example/announce"},
+	})
+	meta, err := torrent.Load(data)
+	if err != nil {
+		t.Fatalf("load torrent: %v", err)
+	}
+	rg := &requestGroup{
+		gid: 1,
+		opts: &config.Options{
+			BTExcludeTracker: []string{"udp://tracker1.example/announce,https://tracker3.example/announce"},
+			BTTracker: []string{
+				"udp://extra1.example/announce",
+				"https://extra2.example/announce",
+			},
+		},
+		state: core.StatusWaiting,
+	}
+	rg.cacheBTStatusMetadata(meta, rg.opts)
+	rg.opts = &config.Options{
+		BTExcludeTracker:  []string{"*"},
+		BTTracker:         []string{"udp://changed.example/announce"},
+		BTTrackerInterval: "13",
+		BTTrackerTimeout:  "7",
+	}
+
+	btMeta, ok := (&Engine{}).requestGroupBTMetadata(rg)
+	if !ok {
+		t.Fatal("requestGroupBTMetadata() failed")
+	}
+	session := newBTTrackerSessionFromTiers(btMeta.announceList, rg.opts)
+	if session == nil {
+		t.Fatal("newBTTrackerSessionFromTiers() returned nil")
+	}
+
+	if got := session.list.CountTiers(); got != 3 {
+		t.Fatalf("CountTiers() = %d, want 3 cached tiers", got)
+	}
+	if got := session.list.GetAnnounce(); got != "udp://tracker2.example/announce" {
+		t.Fatalf("GetAnnounce() = %q, want cached tracker", got)
+	}
+	if got := session.userDefinedInterval; got != 13*time.Second {
+		t.Fatalf("userDefinedInterval = %v, want 13s", got)
+	}
+	if got := session.timeout; got != 7*time.Second {
+		t.Fatalf("timeout = %v, want 7s", got)
 	}
 }
 

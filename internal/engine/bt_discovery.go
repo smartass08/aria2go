@@ -48,12 +48,22 @@ const (
 )
 
 func newBTTrackerSession(meta *torrent.MetaInfo, opts *config.Options) *btTrackerSession {
-	tiers := tracker.NormalizeAnnounceTiers(meta.Announce, meta.AnnounceList, opts.BTExcludeTracker, opts.BTTracker)
-	if len(tiers) == 0 {
+	var excludeTrackers, addTrackers []string
+	if opts != nil {
+		excludeTrackers = opts.BTExcludeTracker
+		addTrackers = opts.BTTracker
+	}
+	tiers := tracker.NormalizeAnnounceTiers(meta.Announce, meta.AnnounceList, excludeTrackers, addTrackers)
+	return newBTTrackerSessionFromTiers(tiers, opts)
+}
+
+func newBTTrackerSessionFromTiers(tiers [][]string, opts *config.Options) *btTrackerSession {
+	list := tracker.NewAnnounceList(tiers)
+	if list.CountTiers() == 0 {
 		return nil
 	}
 	return &btTrackerSession{
-		list:                tracker.NewAnnounceList(tiers),
+		list:                list,
 		interval:            trackerDefaultInterval(),
 		minInterval:         trackerDefaultInterval(),
 		userDefinedInterval: btTrackerInterval(opts),

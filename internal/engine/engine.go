@@ -126,12 +126,14 @@ type requestGroup struct {
 	downloadLimit *Throttle
 	uploadLimit   *Throttle
 	btSwarm       atomic.Pointer[btSwarm]
+	btMeta        atomic.Pointer[torrent.MetaInfo]
+	btStatusMeta  atomic.Pointer[btStatusMetadata]
 
 	filePathFromURI bool
-	btInfoHash      string
 	btUnselected    []string
 	uriUsed         bool
 	activeURI       string
+	activeURIs      []string
 	activeHosts     map[string]int
 	integrity       downloadIntegrity
 	integrityRetry  int
@@ -1183,6 +1185,11 @@ func (e *Engine) Add(spec AddSpec) (core.GID, error) {
 	}
 	if err := e.applyRequestGroupRuntimeOptions(rg, opts); err != nil {
 		return 0, err
+	}
+	if len(spec.Torrent) > 0 {
+		if meta, err := torrent.Load(spec.Torrent); err == nil {
+			rg.cacheBTStatusMetadata(meta, opts)
+		}
 	}
 
 	e.groups.set(gid, rg)
@@ -3546,6 +3553,7 @@ func (e *Engine) runDownload(rg *requestGroup) {
 	rg.uriUsed = true
 	host, _ := uriHostProto(uri)
 	rg.activeURI = uri
+	rg.activeURIs = []string{uri}
 	if host != "" {
 		rg.activeHosts = map[string]int{host: 1}
 	} else {
@@ -4301,6 +4309,7 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 		selectedURIs = []string{uri}
 	}
 	rg.activeURI = selectedURIs[0]
+	rg.activeURIs = append(rg.activeURIs[:0], selectedURIs...)
 	rg.activeHosts = hostUseMap(selectedURIs)
 	startupIdle := time.Duration(parseInt(rg.opts.StartupIdleTime)) * time.Second
 	lowestLimit := e.effectiveLowestSpeedLimit(rg, selectedURIs)
@@ -4457,6 +4466,7 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 						return
 					}
 					rg.activeURI = nextURI
+					rg.activeURIs = []string{nextURI}
 					e.runHTTPDownload(ctx, rg, nextURI, outPath)
 					return
 				} else if !restartScratch {
@@ -4549,6 +4559,7 @@ func (e *Engine) runHTTPDownload(ctx context.Context, rg *requestGroup, uri, out
 		if nextURI, restartScratch := e.nextHTTPResumeFallbackURI(rg, uri, 0); nextURI != "" {
 			recordURI = ""
 			rg.activeURI = nextURI
+			rg.activeURIs = []string{nextURI}
 			e.runHTTPDownload(ctx, rg, nextURI, outPath)
 			return
 		} else if !restartScratch {

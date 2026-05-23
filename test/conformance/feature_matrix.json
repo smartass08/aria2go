@@ -2098,18 +2098,38 @@
       "status": "partial",
       "source_truth": [
         "source-truth/aria2/src/RpcMethodImpl.cc",
-        "source-truth/aria2/src/RequestGroupMan.cc"
+        "source-truth/aria2/src/RequestGroupMan.cc",
+        "source-truth/aria2/src/RequestGroup.cc",
+        "source-truth/aria2/src/DefaultPieceStorage.cc",
+        "source-truth/aria2/src/BitfieldMan.cc",
+        "source-truth/aria2/src/FileEntry.cc",
+        "source-truth/aria2/src/DownloadContext.cc"
       ],
       "evidence": [
         "internal/engine/stopped_ring.go:1",
         "internal/engine/engine.go:1155",
+        "internal/engine/engine.go:1190",
+        "internal/engine/rpc_status.go:15",
+        "internal/engine/rpc_status.go:122",
+        "internal/engine/rpc_status.go:445",
+        "internal/engine/bt_download.go:673",
+        "internal/engine/bt_download.go:890",
         "internal/rpc/dispatcher/dispatcher.go:718"
       ],
       "conformance_coverage": [
-        "test/conformance/rpc_test.go:629"
+        "test/conformance/rpc_test.go:629",
+        "test/conformance/rpc_parity_test.go:84"
       ],
-      "unit_coverage": [],
-      "notes": "Stopped tellStatus now omits the seeder key for terminal statuses, matching aria2's gatherStoppedDownload (verified against RpcMethodImpl.cc). Stays partial because Go stores reduced stopped records: the bittorrent metadata dict and the full file/URI/bitfield surface are not preserved for stopped downloads."
+      "unit_coverage": [
+        "internal/engine/rpc_status_test.go:93",
+        "internal/engine/rpc_status_test.go:114",
+        "internal/engine/rpc_status_test.go:141",
+        "internal/engine/rpc_status_test.go:170",
+        "internal/engine/rpc_status_test.go:256",
+        "internal/engine/rpc_status_test.go:354",
+        "internal/engine/bt_discovery_test.go:56"
+      ],
+      "notes": "Conformance covers stopped HTTP tellStatus/tellStopped/getFiles parity for terminal status, the single current URI duplicated as used/waiting, bitfield-derived completedLength, file completedLength, and stopped BitTorrent tellStatus/tellStopped/getFiles metadata/files/bitfield. Engine unit coverage includes selective stopped completedLength filtering and constrains multi-active URI snapshots to the current active URI because aria2's broader used/waiting URI fidelity depends on actual spent/request-pool/in-flight tracking. Stays partial until multi-used URI tracking and remaining non-HTTP/BT stopped-result shapes are fixed and covered by cross-binary conformance."
     },
     {
       "id": "rpc.parameter-validation-edges",
